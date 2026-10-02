@@ -1,0 +1,75 @@
+name: Release Smart DEM
+
+on:
+  push:
+    tags: ["v*"]          # ex : v1.0.0 — déclenchement automatique à la création du tag
+  workflow_dispatch:      # build de test manuel (sans publication)
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Version SemVer + cohérence avec le tag
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path version.py -Pattern '__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          if ($v -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') { throw "Version invalide (SemVer MAJEUR.MINEUR.CORRECTIF attendu) : $v" }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$v") { throw "Le tag $env:GITHUB_REF_NAME ne correspond pas à version.py (v$v). Corrigez version.py puis recréez le tag." }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Dépendances
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Compilation PyInstaller
+        run: >
+          pyinstaller --noconfirm --windowed --name Smart_DEM
+          --add-data "schema.sql;."
+          --hidden-import simple_websocket --hidden-import wsproto --hidden-import h11
+          main.py
+
+      - name: Paquet de mise à jour (ZIP) + SHA-256
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\Smart_DEM\* -DestinationPath Smart_DEM_update.zip
+          $h = (Get-FileHash Smart_DEM_update.zip -Algorithm SHA256).Hash.ToLower()
+          "$h  Smart_DEM_update.zip" | Out-File -Encoding ascii Smart_DEM_update.zip.sha256
+
+      - name: Installateur Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=${{ steps.ver.outputs.version }} installer.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Smart_DEM_${{ steps.ver.outputs.version }}
+          path: |
+            Output/Smart_DEM_Setup.exe
+            Smart_DEM_update.zip
+            Smart_DEM_update.zip.sha256
+
+      - name: Publication GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Smart DEM v${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          prerelease: ${{ contains(steps.ver.outputs.version, '-') }}   # 1.1.0-rc.1 => pré-version (ignorée par /releases/latest)
+          files: |
+            Output/Smart_DEM_Setup.exe
+            Smart_DEM_update.zip
+            Smart_DEM_update.zip.sha256
