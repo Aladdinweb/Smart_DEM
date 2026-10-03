@@ -7,12 +7,11 @@ from flask_sock import Sock
 from werkzeug.serving import make_server
 
 from data_structures import SERVICE_BY_CODE
+from database import RPC_METHODS
 from tv_page import TV_HTML
 from version import __version__
 
 CURRENT = None   # instance active (pour le bouton « Tester l'écran TV »)
-RPC_METHODS = {"current_shift", "shift_info", "reset_shift", "get", "add_admission", "update_admission", "history",
-               "stats", "find_revisit", "queue", "current_called", "call_next", "recall", "finish"}
 
 
 class Hub:

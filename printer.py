@@ -1,15 +1,79 @@
-"""Impression directe du ticket (80 mm / 58 mm), sans boîte de dialogue."""
+"""Impression SILENCIEUSE (jamais de boîte de dialogue) : PDF toujours archivé + impression directe si imprimante réelle.
+Les imprimantes virtuelles (Microsoft Print to PDF, XPS, OneNote...) sont ignorées : ce sont elles qui ouvrent « Enregistrer sous »."""
 import html, os
 from datetime import datetime
 
-from PyQt6.QtCore import QMarginsF, QSizeF
+from PyQt6.QtCore import QMarginsF, QSizeF, QUrl
 from PyQt6.QtGui import QPageLayout, QPageSize, QTextDocument
 from PyQt6.QtPrintSupport import QPrinter, QPrinterInfo
 
+from branding import print_resources
 from config_manager import data_dir
 from data_structures import SERVICE_BY_CODE
 from database import FMT
 from styles import TRIAGE_TEXT
+
+VIRTUAL = ("pdf", "xps", "onenote", "fax", "writer", "snagit")
+PX_PER_MM = 96 / 25.4          # QTextDocument raisonne en pixels logiques (96 dpi)
+
+
+def _print(doc, pr):
+    (getattr(doc, "print", None) or doc.print_)(pr)
+
+
+def is_virtual(name):
+    return any(k in (name or "").lower() for k in VIRTUAL)
+
+
+def physical_printers():
+    return [n for n in QPrinterInfo.availablePrinterNames() if not is_virtual(n)]
+
+
+def _make(pdf_path=None, name=None, size_mm=None, margin=2):
+    pr = QPrinter(QPrinter.PrinterMode.HighResolution)
+    if pdf_path:
+        pr.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        pr.setOutputFileName(pdf_path)
+    elif name:
+        pr.setPrinterName(name)
+    page = QPageSize(QSizeF(*size_mm), QPageSize.Unit.Millimeter, "Doc") if size_mm else QPageSize(QPageSize.PageSizeId.A4)
+    pr.setPageSize(page)
+    pr.setPageMargins(QMarginsF(margin, margin, margin, margin), QPageLayout.Unit.Millimeter)
+    return pr
+
+
+def print_document(cfg, html_text, resources, kind, name, printer_name=None, width_mm=None):
+    """kind = 'ticket' (rouleau 58/80 mm, hauteur ajustée au contenu) ou 'a4'.
+    Retourne (ok, message). Le PDF est TOUJOURS enregistré dans %LOCALAPPDATA%\\Smart_DEM\\tickets|documents."""
+    try:
+        res = dict(print_resources())
+        res.update(resources or {})
+        doc = QTextDocument()
+        for k, pix in res.items():
+            doc.addResource(QTextDocument.ResourceType.ImageResource, QUrl(k), pix)
+        doc.setHtml(html_text)
+        if kind == "ticket":
+            margin, w = 2, float(width_mm or cfg.get("paper_width_mm", 80))
+            doc.setTextWidth((w - 2 * margin) * PX_PER_MM)
+            h_px = doc.size().height() + 4
+            doc.setPageSize(QSizeF((w - 2 * margin) * PX_PER_MM, h_px))
+            size_mm = (w, h_px / PX_PER_MM + 2 * margin + 2)
+            folder, printer_cfg = "tickets", cfg.get("printer", "")
+        else:
+            margin, size_mm = 10, None
+            doc.setPageSize(QSizeF((210 - 2 * margin) * PX_PER_MM, (297 - 2 * margin) * PX_PER_MM))
+            folder, printer_cfg = os.path.join("documents", name.split("_")[0]), cfg.get("doc_printer", "")
+        out = os.path.join(data_dir(), folder)
+        os.makedirs(out, exist_ok=True)
+        pdf = os.path.join(out, f"{name}_{datetime.now():%Y%m%d_%H%M%S}.pdf")
+        _print(doc, _make(pdf_path=pdf, size_mm=size_mm, margin=margin))          # 1) archive PDF silencieuse
+        target = printer_name if printer_name is not None else (printer_cfg or QPrinterInfo.defaultPrinterName())
+        if target and not is_virtual(target) and target in QPrinterInfo.availablePrinterNames():
+            _print(doc, _make(name=target, size_mm=size_mm, margin=margin))      # 2) impression directe
+            return True, f"Imprimé sur « {target} » — PDF : {pdf}"
+        return True, f"PDF enregistré (aucune imprimante physique configurée) : {pdf}"
+    except Exception as ex:   # l'impression ne doit jamais bloquer l'enregistrement
+        return False, str(ex)
 
 
 def ticket_html(cfg, row):
@@ -18,37 +82,21 @@ def ticket_html(cfg, row):
     e = html.escape
     triage = TRIAGE_TEXT.get(row.get("triage_level") or "", "")
     triage_html = f"<p style='font-size:11pt;font-weight:bold;margin:2px'>{e(triage.upper())}</p>" if triage else ""
+    name = f"{(row.get('last_name') or '').upper()} {row.get('first_name') or ''}".strip() or row.get("full_name", "")
     return f"""<div style='text-align:center;font-family:Arial'>
-<p style='font-size:10pt;font-weight:bold;margin:0'>{e(cfg.get('parent', ''))}</p>
-<p style='font-size:9pt;margin:0 0 4px 0'>{e(cfg.get('structure', ''))}</p><hr>
+<table width='100%' cellspacing='0' cellpadding='0'><tr>
+<td width='14%'><img src='logo_ministere' width='34' height='34'></td>
+<td align='center'><p style='font-size:6pt;font-weight:bold;margin:0'>République Algérienne Démocratique et Populaire</p>
+<p style='font-size:6pt;margin:0'>Ministère de la Santé</p></td>
+<td width='14%' align='right'><img src='drapeau' width='34' height='34'></td></tr></table>
+<p style='font-size:9pt;font-weight:bold;margin:2px 0 0 0'>{e(cfg.get('parent', ''))}</p>
+<p style='font-size:8pt;margin:0 0 3px 0'>{e(cfg.get('structure', ''))}</p><hr>
 <p style='font-size:11pt;margin:2px'>{e(svc['name'])}</p>
 <p style='font-size:34pt;font-weight:bold;margin:2px'>{e(row['ticket_label'])}</p>{triage_html}
-<p style='font-size:9pt;margin:2px'>{e(row['full_name'])}</p>
+<p style='font-size:9pt;margin:2px'>{e(name)}</p>
 <p style='font-size:8pt;margin:2px'>{dt:%d/%m/%Y  %H:%M}</p><hr>
 <p style='font-size:8pt;margin:0'>Veuillez patienter. Merci.</p></div>"""
 
 
 def print_ticket(cfg, row, printer_name=None, width_mm=None):
-    """Retourne (ok, message). Repli automatique en PDF si aucune imprimante n'est disponible."""
-    name = cfg.get("printer", "") if printer_name is None else printer_name
-    width = float(width_mm or cfg.get("paper_width_mm", 80))
-    try:
-        pr = QPrinter(QPrinter.PrinterMode.HighResolution)
-        pdf_path = None
-        if name == "__PDF__" or (not name and not QPrinterInfo.defaultPrinterName()):
-            folder = os.path.join(data_dir(), "tickets")
-            os.makedirs(folder, exist_ok=True)
-            pdf_path = os.path.join(folder, f"{row['ticket_label']}_{datetime.now():%H%M%S}.pdf")
-            pr.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
-            pr.setOutputFileName(pdf_path)
-        elif name:
-            pr.setPrinterName(name)
-        pr.setPageSize(QPageSize(QSizeF(width, 160), QPageSize.Unit.Millimeter, "Ticket"))
-        pr.setPageMargins(QMarginsF(2, 2, 2, 2), QPageLayout.Unit.Millimeter)
-        doc = QTextDocument()
-        doc.setHtml(ticket_html(cfg, row))
-        doc.setPageSize(QSizeF(pr.pageRect(QPrinter.Unit.DevicePixel).size()))
-        doc.print(pr)
-        return True, (f"PDF : {pdf_path}" if pdf_path else "OK")
-    except Exception as ex:  # l'impression ne doit jamais bloquer l'enregistrement
-        return False, str(ex)
+    return print_document(cfg, ticket_html(cfg, row), {}, "ticket", row["ticket_label"], printer_name, width_mm)

@@ -10,7 +10,8 @@ import github_updater
 import updater
 from config_manager import app_dir
 from database import now
-from printer import print_ticket
+from printer import physical_printers, print_ticket
+from ui_login import UsersDialog
 from styles import stylesheet
 from ui_common import restart_app
 from ui_setup import NetworkForm, StructureRoleForm
@@ -41,15 +42,22 @@ class SettingsDialog(QDialog):
         t2 = QWidget(); l2 = QVBoxLayout(t2)
         g = QGroupBox("Imprimante thermique (impression directe)"); gf = QFormLayout(g)
         self.printer = QComboBox()
-        self.printer.addItem("(Imprimante par défaut de Windows)", "")
-        for n in QPrinterInfo.availablePrinterNames():
+        self.printer.addItem("(Imprimante par défaut de Windows, si physique)", "")
+        for n in physical_printers():          # les imprimantes « PDF / XPS » sont exclues : elles ouvrent « Enregistrer sous »
             self.printer.addItem(n, n)
-        self.printer.addItem("Enregistrer en PDF (test)", "__PDF__")
+        self.printer.addItem("PDF seulement (aucune impression papier)", "__PDF__")
         self.printer.setCurrentIndex(max(0, self.printer.findData(cfg.get("printer", ""))))
         self.paper = QComboBox(); self.paper.addItem("80 mm", 80); self.paper.addItem("58 mm", 58)
         self.paper.setCurrentIndex(0 if int(cfg.get("paper_width_mm", 80)) == 80 else 1)
         test = QPushButton("Imprimer un ticket test"); test.clicked.connect(self.test_print)
-        gf.addRow("Imprimante :", self.printer); gf.addRow("Largeur du papier :", self.paper); gf.addRow(test)
+        self.docprinter = QComboBox()
+        self.docprinter.addItem("(Imprimante par défaut de Windows, si physique)", "")
+        for n in physical_printers():
+            self.docprinter.addItem(n, n)
+        self.docprinter.addItem("PDF seulement (aucune impression papier)", "__PDF__")
+        self.docprinter.setCurrentIndex(max(0, self.docprinter.findData(cfg.get("doc_printer", ""))))
+        gf.addRow("Imprimante A4 (ordonnances, demandes) :", self.docprinter)
+        gf.addRow("Imprimante des tickets :", self.printer); gf.addRow("Largeur du papier :", self.paper); gf.addRow(test)
         l2.addWidget(g)
         self.net = NetworkForm(cfg); l2.addWidget(self.net)
         bt = QPushButton("Tester la connexion au Hub / l'écran TV"); bt.clicked.connect(self.test_network)
@@ -65,7 +73,9 @@ class SettingsDialog(QDialog):
         self.theme.setCurrentIndex(0 if cfg.get("theme") != "light" else 1)
         sf.addRow("Nouveau code PIN (vide = inchangé) :", self.pin1)
         sf.addRow("Confirmer :", self.pin2); sf.addRow("Thème :", self.theme)
-        l3.addWidget(sg)
+        bu = QPushButton("👥 Gérer les utilisateurs (médecins, accueil, radio, pharmacie)…")
+        bu.clicked.connect(lambda: UsersDialog(self.db, self).exec())
+        l3.addWidget(sg); l3.addWidget(bu)
 
         ug = QGroupBox("Mises à jour GitHub"); ul = QVBoxLayout(ug)
         ul.addWidget(QLabel(f"Version installée : <b>v{__version__}</b>"))
@@ -205,7 +215,7 @@ class SettingsDialog(QDialog):
         changed = any(self.cfg.get(k) != v for k, v in vals.items())
         self.cfg.update(vals)
         self.cfg.update({"revisit_check_hours": self.revisit.value(), "printer": self.printer.currentData(),
-                         "paper_width_mm": self.paper.currentData(), "theme": self.theme.currentData(),
+                         "paper_width_mm": self.paper.currentData(), "doc_printer": self.docprinter.currentData(), "theme": self.theme.currentData(),
                          "auto_update_check": self.auto.isChecked(), "github_repo": self.repo.text().strip()})
         if self.pin1.text():
             self.cfg.set_pin(self.pin1.text())

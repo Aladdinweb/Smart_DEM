@@ -32,7 +32,9 @@ DEFAULTS = {
     "role": "accueil",            # accueil | dedie | medecin
     "services": [],               # codes de services (poste dédié / médecin)
     "station_name": "",
-    "revisit_check_hours": 24,
+    "config_version": 2,
+    "revisit_check_hours": 72,   # patient récurrent : 72 h
+    "doc_printer": "",            # imprimante A4 (ordonnances, demandes)
     "printer": "",                # "" = défaut Windows, "__PDF__" = fichier PDF, sinon nom de l'imprimante
     "paper_width_mm": 80,
     "net_mode": "local",          # local | hub | client
@@ -65,7 +67,12 @@ class Config:
     def load(self):
         try:
             with open(self.path, encoding="utf-8") as f:
-                self.data.update(json.load(f))
+                loaded = json.load(f)
+            if loaded.get("config_version", 1) < 2:        # v1.0.0 -> v1.1.0
+                if loaded.get("revisit_check_hours", 24) == 24:
+                    loaded["revisit_check_hours"] = 72
+                loaded["config_version"] = 2
+            self.data.update(loaded)
         except FileNotFoundError:
             pass
         except json.JSONDecodeError:

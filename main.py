@@ -1,6 +1,7 @@
 """Smart DEM — point d'entrée."""
 import os, sys, traceback
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from config_manager import Config
@@ -59,13 +60,18 @@ def main():
                 cfg.set("net_mode", "local"); cfg.save(); continue
             return 1
 
-    if cfg.get("role") == "medecin":
-        from ui_doctor import DoctorWindow
-        win = DoctorWindow(cfg, db)
+    role = cfg.get("role")
+    if role == "medecin":
+        from ui_doctor import DoctorWindow as Win
+    elif role == "radio":
+        from ui_radio import RadioWindow as Win
+    elif role == "pharmacie":
+        from ui_pharmacy import PharmacyWindow as Win
     else:
-        from ui_reception import ReceptionWindow
-        win = ReceptionWindow(cfg, db)
+        from ui_reception import ReceptionWindow as Win
+    win = Win(cfg, db)
     win.showMaximized()
+    QTimer.singleShot(0, win.start_session)      # écran de connexion par PIN dès le démarrage
     return app.exec()
 
 

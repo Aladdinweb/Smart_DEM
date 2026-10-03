@@ -1,0 +1,11 @@
+LOGO DU MINISTÈRE DE LA SANTÉ
+=============================
+Placez ici le fichier officiel :   logo_ministere.png   (fond transparent ou blanc, de préférence carré).
+Il est affiché en cercle, à GAUCHE de l'en-tête, avec exactement la même taille que le drapeau (à droite).
+
+Ordre de recherche :
+  1. %LOCALAPPDATA%\Smart_DEM\assets\logo_ministere.png   (propre à un poste, sans réinstaller)
+  2. le dossier assets\ fourni avec l'application (ce dossier)
+
+Sans fichier, un badge provisoire (croix verte) est affiché à la place.
+Le drapeau d'Algérie est dessiné par le programme (aucun fichier nécessaire).

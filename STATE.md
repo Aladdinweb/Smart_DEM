@@ -4,87 +4,109 @@
 
 | | |
 |---|---|
-| **Version courante** | `1.0.0` (source unique : `version.py`) |
-| **Statut** | Code complet de la v1.0.0 écrit ; tests unitaires de la couche données/Hub/SemVer prêts. **Interface PyQt6, impression thermique, CI et mise à jour GitHub : pas encore validés sur matériel réel.** |
-| **Dépôt** | GitHub (`GITHUB_REPO` dans `version.py` — à ajuster au nom réel) |
-| **Cible** | Windows 10/11 — PyQt6 + SQLite, déploiement `Smart_DEM_Setup.exe` |
+| **Version courante** | `1.1.0` (source unique : `version.py`) — dernière version publiée : `1.0.0` |
+| **Statut** | v1.1.0 : code complet. Testé automatiquement : couche données (utilisateurs/PIN, ordonnance + QR, radiologie, migration v1→v2), SemVer, Hub. **Interface PyQt6, impression thermique/A4, lecteur de QR, mise à jour GitHub : à valider sur poste Windows réel.** |
+| **Dépôt** | https://github.com/Aladdinweb/Smart_DEM |
+| **Cible** | Windows 10/11 — PyQt6 + SQLite, `Smart_DEM_Setup.exe` |
 
-## 1. Architecture
+## 1. Postes (rôle choisi au premier lancement ; connexion par PIN pour les utilisateurs)
+
+| Poste | Utilisateurs (rôle) | Fonctions |
+|---|---|---|
+| Accueil Général / Poste Dédié | Accueil | Nom + Prénom séparés, tri médical, ticket (impression silencieuse), historique/correction, archivage auto |
+| Poste Médecin | Médecin | File priorisée + ⚠️ Patient Récurrent, ordonnance numérique (QR, griffe), demande de radiologie (LAN), demande d'analyses, clôture + archivage |
+| Poste Radiologie | Manipulateur radio | File LAN (demandes + inscriptions directes), alerte visuelle/sonore, appel, validation *Terminé / En attente de tirage* renvoyée au médecin |
+| Poste Pharmacie | Pharmacien | Ordonnances reçues (file de transit), scan QR → authenticité, « délivrée » |
+
+Administration (PIN administrateur) : paramètres, gestion des utilisateurs (création, rôle, spécialité, PIN, activation), fermeture de l'application.
+Utilisateur : bouton **🔒 Déconnexion** (à côté de Paramètres) → verrouille et permet de changer d'utilisateur sans fermer ; **🖋 Mon profil** (médecin) : import de la griffe (PNG transparent), changement du PIN.
+
+## 2. Architecture
 
 | Module | Rôle |
 |---|---|
-| `main.py` | Démarrage : assistant de premier lancement, choix du mode réseau, fenêtre selon le rôle |
-| `ui_setup.py` · `ui_settings.py` | Assistant / Paramètres (Structure & Rôle, Imprimante & Réseau, Sécurité & Mises à jour) |
-| `ui_reception.py` · `ui_doctor.py` · `ui_common.py` | Accueil & tri, Poste Dédié, Poste Médecin, en-tête / bannière / PIN |
-| `database.py` · `schema.sql` | SQLite (gardes, compteurs, admissions, appels, audit) + migrations de schéma |
-| `hub_server.py` · `tv_page.py` · `remote_db.py` | Hub LAN Flask + WebSocket, écran TV `/tv`, client RPC des postes distants |
-| `github_updater.py` · `updater.py` · `ui_update.py` | Mise à jour GitHub (API Releases) et hors ligne (dossier/USB/ZIP) |
-| `printer.py` | Ticket 80/58 mm en impression directe (repli PDF) |
+| `main.py` | Démarrage : assistant, mode réseau, poste selon le rôle, session PIN |
+| `database.py` · `schema.sql` | SQLite : utilisateurs, gardes, admissions, consultations, ordonnances, radiologie, analyses, transit pharmacie, migrations |
+| `ui_common.py` · `ui_login.py` | Fenêtre de base (en-tête officiel, session, bannière), connexion PIN, utilisateurs, profil |
+| `ui_reception.py` · `ui_doctor.py` · `ui_radio.py` · `ui_pharmacy.py` | Les 4 types de poste |
+| `branding.py` · `assets/` | En-tête officiel : logo (gauche), République / Ministère (centre), drapeau (droite), mêmes cercles |
+| `printer.py` · `documents.py` · `qr.py` | Impression silencieuse + PDF, ordonnance/demandes A4, QR Code |
+| `archive.py` | Archivage JSON local : `archives\reception\`, `archives\consultations\` |
+| `hub_server.py` · `remote_db.py` · `tv_page.py` | Hub LAN (RPC + WebSocket TV), client, écran TV `/tv` |
+| `github_updater.py` · `updater.py` · `ui_update.py` | Mises à jour GitHub (SHA-256) et hors ligne |
 
-**Modes réseau** (par poste, `config.json` → `net_mode`)
-- `local` : poste autonome, base SQLite locale.
-- `hub` : héberge la base + le serveur (port `hub_port`, 5000 par défaut) + l'écran TV `http://IP_DU_HUB:5000/tv`.
-- `client` : tous les appels de données passent par le Hub (jeton partagé `lan_token`) ; accueil, postes dédiés et médecins partagent ainsi la même file d'attente.
+**Données** `%LOCALAPPDATA%\Smart_DEM\` : `dem_database.db`, `config.json`, `structures.json`, `backups\`, `tickets\` (PDF des tickets), `documents\` (PDF ordonnances/demandes), `archives\reception\`, `archives\consultations\`, `assets\logo_ministere.png` (optionnel), `error.log`. La mise à jour GitHub/hors ligne **exclut** ces éléments.
 
-**Données** : `%LOCALAPPDATA%\Smart_DEM\` → `dem_database.db`, `config.json`, `structures.json`, `backups\`, `tickets\`, `error.log`.
-Le programme est installé dans ce même dossier ; la mise à jour **exclut** ces fichiers/dossiers par nom.
+**Modes réseau** : `local` (autonome), `hub` (héberge base + serveur + TV), `client` (utilise la base du Hub, jeton partagé). Les utilisateurs, ordonnances, demandes de radiologie et la file pharmacie sont dans la base du Hub : tous les postes les partagent. Les postes se rafraîchissent par interrogation (médecin/pharmacie 3 s, radiologie 2 s) ; l'écran TV est poussé par WebSocket.
 
-## 2. Gestion des versions (SemVer `MAJEUR.MINEUR.CORRECTIF`)
+## 3. Modèle de données (schéma v2)
 
-- **CORRECTIF** (1.0.0 → 1.0.1) : correction de bug, sans changement de données ni de protocole.
-- **MINEUR** (1.0.x → 1.1.0) : nouvelle fonctionnalité compatible. Une migration de schéma SQLite *additive* est permise.
-- **MAJEUR** (1.x → 2.0.0) : changement incompatible (protocole Hub/clients, schéma). Un Hub et des clients de **MAJEUR différent refusent de dialoguer** (message explicite) : mettre à jour tous les postes.
-- Pré-versions : `1.1.0-rc.1` → publiées en *pre-release* GitHub, ignorées par `/releases/latest` donc jamais proposées aux postes.
-- Schéma de base : `SCHEMA_VERSION` + `MIGRATIONS` dans `database.py` ; sauvegarde automatique avant toute migration.
+`users` (PIN haché PBKDF2, verrouillage 60 s après 5 échecs, griffe) · `admissions` (+ `last_name`, `first_name`, `created_by`) · `consultations` · `prescriptions` (contenu figé, SHA-256, signature HMAC) · `transit_queue` (JSON léger vers la pharmacie) · `radiology_requests` (passage RAD-xxx, statuts PENDING/CALLED/DONE/AWAITING_PRINT) · `lab_requests` · `drugs` (autocomplétion, s'enrichit) · `shifts`, `counters`, `calls`, `audit_log`, `meta`.
+Migration v1→v2 : sauvegarde automatique puis ajout des colonnes ; les anciennes admissions gardent leur nom complet dans `last_name`.
+
+**QR de l'ordonnance** : `SDEM1` + UUID (32 hex) + signature HMAC (16 hex), clé secrète stockée uniquement dans la base du Hub. La pharmacie détecte un QR falsifié ou un contenu altéré. Saisie manuelle du code (8 premiers caractères) possible mais « non vérifiée ».
+
+## 4. Gestion des versions (SemVer `MAJEUR.MINEUR.CORRECTIF`)
+
+- **CORRECTIF** : correction sans changement de données ni de protocole.
+- **MINEUR** (ex. 1.1.0) : fonctionnalités compatibles ; migration de schéma *additive* permise (`MIGRATIONS`).
+- **MAJEUR** : changement incompatible ; un Hub et des clients de MAJEUR différent refusent de dialoguer (message explicite).
+- Pré-versions `1.2.0-rc.1` → *pre-release* GitHub, ignorées par `/releases/latest`.
 
 ### Procédure de release
-1. Modifier `__version__` dans `version.py`.
-2. Compléter l'historique ci-dessous (section « Historique des modifications »).
-3. `git commit -am "Release 1.0.1"` puis `git tag v1.0.1` puis `git push origin main v1.0.1`.
-4. Le workflow `.github/workflows/build.yml` vérifie que le tag = `v` + `version.py`, lance les tests, compile (PyInstaller), génère `Smart_DEM_Setup.exe`, `Smart_DEM_update.zip` et `Smart_DEM_update.zip.sha256`, puis publie la Release GitHub.
-5. Les postes détectent la nouvelle version (vérification au démarrage ou bouton dans Paramètres), téléchargent le ZIP, vérifient le SHA-256 et l'appliquent **sans toucher à la base**.
+1. Modifier `__version__` dans `version.py` ; compléter l'historique (§7).
+2. `git add -A && git commit -m "Release X.Y.Z"` puis `git push`.
+3. Test à blanc : onglet Actions › *Release Smart DEM* › *Run workflow* (rien n'est publié).
+4. `git tag -a vX.Y.Z -m "Smart DEM X.Y.Z" && git push origin vX.Y.Z`.
+5. Le workflow vérifie tag = `v` + `version.py`, lance les tests, compile, publie `Smart_DEM_Setup.exe`, `Smart_DEM_update.zip`, `.sha256`.
+6. Les postes proposent la mise à jour (Paramètres › Sécurité & Mises à Jour) ; base et configuration restent intactes ; la base est migrée au lancement.
+**Mettre à jour le Hub et les clients ensemble** (même version MAJEURE obligatoire, MINEURE recommandée).
 
-## 3. Feuille de route
+## 5. Feuille de route
 
-### v1.0.0 — Socle opérationnel
-- [x] Assistant de premier lancement (wilaya → type → établissement → structure en cascade, rôle du poste, PIN)
-- [x] Accueil Général / Poste Dédié (multi-services) / Poste Médecin
-- [x] Tri médical dynamique (vert/orange/rouge) limité aux Urgences et à la Médecine Générale
-- [x] Tickets par service (`LAB-001`…), remise à zéro manuelle des compteurs (nouvelle garde), pas de reset automatique à minuit
-- [x] Historique, correction d'erreur (numéro de ticket conservé), réimpression
-- [x] Alerte patient récurrent (24–48 h, informative, jamais bloquante)
-- [x] Hub LAN Flask + WebSocket, écran TV (numéro, service, salle — jamais de nom de patient)
-- [x] Mise à jour GitHub (API Releases + SHA-256) et mise à jour hors ligne ; base et `config.json` protégés
-- [x] CI/CD GitHub Actions, SemVer, installateur Inno Setup
-- [ ] Validation sur poste Windows réel (UI, imprimante thermique 80/58 mm, pare-feu Windows pour le port du Hub)
-- [ ] Premier tag `v1.0.0` et test de bout en bout de la mise à jour (v1.0.0 → v1.0.1)
+### v1.0.0 — publiée
+Socle : accueil/tri/médecin, tickets, historique, récurrence, Hub LAN + TV, mises à jour GitHub, CI/CD.
+
+### v1.1.0 — en préparation (cahier des charges « synthèse finale »)
+- [x] En-tête officiel sur toutes les vues et documents (logo Ministère à gauche, drapeau à droite, cercles identiques)
+- [x] Nom / Prénom séparés (saisie, recherche, correction, documents)
+- [x] Impression silencieuse (PDF automatique dans `tickets\`, imprimantes virtuelles ignorées) + archivage auto de l'accueil
+- [x] Connexion PIN 4 chiffres par utilisateur, identité dans l'en-tête, bouton Déconnexion
+- [x] Badge ⚠️ Patient Récurrent (72 h) : file d'attente et fiche patient du médecin
+- [x] Ordonnance numérique (autocomplétion, raccourcis posologie/durée, griffe, QR, envoi pharmacie)
+- [x] Demande de radiologie (formulaire structuré, envoi LAN, impression papier optionnelle) + demande d'analyses
+- [x] Clôture de consultation + archivage local
+- [x] Poste Radiologie et Poste Pharmacie
+- [ ] **À fournir** : logo officiel `logo_ministere.png` (badge provisoire sinon)
+- [ ] Validation terrain : impression 80/58 mm et A4, lecteur de QR USB, Hub + 2 postes
 
 ### v2.0.0 — Propositions (à valider)
-- [ ] Comptes utilisateurs individuels (PIN par agent, journal d'audit par utilisateur)
-- [ ] Statistiques de garde et exports (PDF/Excel), temps d'attente moyens
+- [ ] Statistiques de garde et exports (PDF/Excel)
 - [ ] Sauvegardes planifiées + restauration depuis l'interface
-- [ ] Hub en service Windows (démarrage automatique) et distribution des mises à jour du Hub vers les clients du LAN (utile sans internet)
-- [ ] Signature de code de l'exécutable (évite l'avertissement SmartScreen)
-- [ ] Interface bilingue FR/AR (RTL)
+- [ ] Hub en service Windows ; distribution des mises à jour du Hub vers les clients (utile sans internet)
+- [ ] Notifications poussées (WebSocket) au lieu de l'interrogation
+- [ ] Signature de code de l'exécutable ; interface FR/AR (RTL)
 
-## 4. Dépendances
+## 6. Dépendances
 
-| Paquet | Usage |
-|---|---|
-| Python 3.12 | exécution / build CI |
-| PyQt6 ≥ 6.6 | interface, impression |
-| Flask ≥ 3.0, flask-sock ≥ 0.7 (→ simple-websocket) | Hub LAN et WebSocket, sans client JS externe |
-| PyInstaller | compilation (CI uniquement) |
-| Inno Setup 6 | installateur (CI uniquement) |
-| SQLite | inclus dans Python |
+PyQt6 ≥ 6.6 · Flask ≥ 3.0 · flask-sock ≥ 0.7 · **segno ≥ 1.6** (QR Code, pur Python) · PyInstaller et Inno Setup 6 (CI uniquement) · Python 3.12.
 
-## 5. Limites connues
-- Le Hub est un point unique : si son poste est éteint, les postes clients ne fonctionnent plus (messages d'erreur explicites, aucune perte de données).
-- Le réseau local utilise du HTTP simple avec un jeton partagé : adapté à un LAN fermé de service, pas à un réseau ouvert.
-- La mise à jour GitHub suppose un dépôt **public** (un dépôt privé exigerait un jeton d'accès).
-- L'exécutable n'est pas signé : Windows SmartScreen peut afficher un avertissement à l'installation.
+## 7. Limites connues et points d'attention
+- **Données de santé** : bases et archives JSON/PDF sont en clair dans le profil Windows de l'utilisateur ; protéger les sessions Windows et sauvegarder. Le PIN utilisateur (4 chiffres) protège l'usage de l'application, pas les fichiers.
+- **Réseau** : HTTP simple + jeton partagé sur LAN fermé ; le PIN transite en clair sur ce LAN.
+- **Lecteur de QR** : lecteur USB en mode « clavier » ; vérifier la disposition (AZERTY) pour que les chiffres soient bien lus. Pas de lecture par caméra.
+- **Griffe numérique** : image imprimée, **sans valeur de signature électronique légale**.
+- **Dictionnaire de médicaments** : commodité de saisie, pas une référence pharmacologique ; le médecin reste responsable du contenu.
+- **Hub** : point unique ; sans lui les postes clients sont inutilisables (aucune perte de données).
+- **Logo officiel** : à fournir par l'établissement (usage conforme à la réglementation).
+- Dépôt GitHub **public** requis pour la mise à jour automatique ; exécutable non signé (SmartScreen).
 
-## 6. Historique des modifications
+## 8. Historique des modifications
 
-### [1.0.0] — en préparation
-**Ajouté** : tout le périmètre v1.0.0 ci-dessus.
+### [1.1.0] — en préparation
+**Ajouté** : en-tête officiel ; Nom/Prénom ; impression silencieuse + PDF + archivage ; sessions PIN, déconnexion, gestion des utilisateurs ; badge récurrence 72 h ; ordonnance numérique (QR HMAC, griffe, pharmacie) ; demandes de radiologie et d'analyses ; clôture + archivage ; postes Radiologie et Pharmacie ; migration de schéma v2.
+**Modifié** : fenêtre de détection des patients récurrents 24 h → 72 h (reprise automatique de l'ancienne valeur par défaut) ; accès base protégé par verrou sur toutes les lectures ; mise en page d'impression recalculée (ticket à hauteur de contenu).
+**Corrigé** : boîte « Enregistrer sous PDF » (imprimante virtuelle par défaut) ; échelle de mise en page à l'impression.
+
+### [1.0.0] — publiée
+Socle initial (voir §5).

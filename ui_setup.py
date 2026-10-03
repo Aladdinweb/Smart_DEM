@@ -30,7 +30,9 @@ class StructureRoleForm(QWidget):
         r = QGroupBox("Rôle du poste"); rl = QVBoxLayout(r)
         self.rb = {"accueil": QRadioButton("Accueil Général — tous les services + tri médical"),
                    "dedie": QRadioButton("Poste Dédié — un ou plusieurs services (cases à cocher)"),
-                   "medecin": QRadioButton("Poste Médecin — appel et gestion des consultations")}
+                   "medecin": QRadioButton("Poste Médecin — appel, ordonnance, demandes, consultations"),
+                   "radio": QRadioButton("Poste Manipulateur Radiologie — file LAN, appels, validation"),
+                   "pharmacie": QRadioButton("Poste Pharmacie — réception et validation QR des ordonnances")}
         grp = QButtonGroup(self)
         for k, b in self.rb.items():
             grp.addButton(b); rl.addWidget(b); b.toggled.connect(self._role_changed)
@@ -58,7 +60,7 @@ class StructureRoleForm(QWidget):
         self.structure.addItems(structures(self.wilaya.currentText(), self.type.currentText(), self.parent_.currentText()))
 
     def _role_changed(self, *_):
-        self.svc_box.setVisible(not self.rb["accueil"].isChecked())
+        self.svc_box.setVisible(self.rb["dedie"].isChecked() or self.rb["medecin"].isChecked())
 
     def load(self, cfg):
         self.wilaya.setCurrentText(cfg.get("wilaya", "31 - Oran"))
@@ -76,7 +78,7 @@ class StructureRoleForm(QWidget):
         role = next(k for k, b in self.rb.items() if b.isChecked())
         return {"wilaya": self.wilaya.currentText().strip(), "type": self.type.currentText(),
                 "parent": self.parent_.currentText().strip(), "structure": self.structure.currentText().strip(),
-                "role": role, "services": [c for c, cb in self.checks.items() if cb.isChecked()] if role != "accueil" else []}
+                "role": role, "services": [c for c, cb in self.checks.items() if cb.isChecked()] if role in ("dedie", "medecin") else (["RAD"] if role == "radio" else [])}
 
     def validate(self):
         v = self.values()
