@@ -1,11 +1,10 @@
-LOGO DU MINISTÈRE DE LA SANTÉ
-=============================
-Placez ici le fichier officiel :   logo_ministere.png   (fond transparent ou blanc, de préférence carré).
-Il est affiché en cercle, à GAUCHE de l'en-tête, avec exactement la même taille que le drapeau (à droite).
+LOGO OFFICIEL DU MINISTÈRE DE LA SANTÉ
+======================================
+Deux façons de l'installer (PNG ou JPG, de préférence carré) :
+  1. Dans l'application : Paramètres > Imprimantes & Modèles > « Importer le logo du Ministère… » (immédiat, sans réinstaller).
+  2. Dans le dépôt GitHub : placer le fichier  assets/logo_ministere.png  puis publier une nouvelle version (tous les postes l'auront).
+Le logo est affiché en cercle à GAUCHE de l'en-tête, avec la même taille que le drapeau (à droite), et dans l'en-tête de tous les documents imprimés.
+Sans fichier, rien n'est affiché à gauche (aucun badge provisoire).
 
-Ordre de recherche :
-  1. %LOCALAPPDATA%\Smart_DEM\assets\logo_ministere.png   (propre à un poste, sans réinstaller)
-  2. le dossier assets\ fourni avec l'application (ce dossier)
-
-Sans fichier, un badge provisoire (croix verte) est affiché à la place.
-Le drapeau d'Algérie est dessiné par le programme (aucun fichier nécessaire).
+smart_dem.ico : icône de l'application (générée par tools/make_icon.py ; remplaçable par un .ico professionnel de votre choix,
+même nom de fichier, avant la publication d'une version).

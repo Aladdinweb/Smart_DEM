@@ -1,6 +1,6 @@
 """Listes de saisie rapide (commodités de saisie, pas une référence pharmacologique : le médecin reste responsable)."""
-EXAM_TYPES = ["Radio X", "Échographie", "Scanner"]
-REGIONS = ["Thorax", "Abdomen", "Crâne", "Rachis cervical", "Rachis dorsal", "Rachis lombaire", "Bassin",
+EXAM_TYPES = ["Radio X", "Échographie", "Scanner", "Radio panoramique dentaire"]
+REGIONS = ["Mâchoires (panoramique)", "Thorax", "Abdomen", "Crâne", "Rachis cervical", "Rachis dorsal", "Rachis lombaire", "Bassin",
            "Membre supérieur", "Membre inférieur", "Épaule", "Genou", "Cheville", "Main / Poignet", "Pied",
            "Pelvis (échographie)", "Autre…"]
 SIDES = ["Non applicable", "Droit", "Gauche", "Bilatéral"]
@@ -10,8 +10,8 @@ POSOLOGIES = ["1 cp x 1/j (matin)", "1 cp x 1/j (soir)", "1 cp x 2/j", "1 cp x 3
               "1 gélule x 2/j", "1 gélule x 3/j", "1 sachet x 1/j", "1 sachet x 3/j", "1 c. à café x 3/j",
               "1 c. à soupe x 3/j", "1 ampoule x 1/j", "2 pulvérisations x 2/j", "1 application x 2/j", "si besoin"]
 DURATIONS = ["3 jours", "5 jours", "7 jours", "10 jours", "15 jours", "1 mois", "3 mois", "Traitement continu"]
-LAB_ITEMS = ["NFS (numération formule sanguine)", "Glycémie à jeun", "HbA1c", "Urée", "Créatinine",
-             "Bilan lipidique (cholestérol, triglycérides)", "Transaminases (ASAT / ALAT)", "CRP", "VS",
+LAB_ITEMS = ["FNS (formule numération sanguine)", "Labstix (bandelette urinaire)", "Glycémie à jeun", "HbA1c", "Urée", "Créatinine",
+             "Biochimie sanguine (bilan standard)", "Bilan lipidique (cholestérol, triglycérides)", "Transaminases (ASAT / ALAT)", "CRP", "VS",
              "Ionogramme sanguin", "Acide urique", "TSH", "ECBU", "Groupe sanguin / Rhésus", "Bilan de coagulation (TP / INR)",
              "Sérologie (à préciser)"]
 DRUGS_SEED = [

@@ -2,3 +2,5 @@ PyQt6>=6.6
 flask>=3.0
 flask-sock>=0.7
 segno>=1.6
+cryptography>=42
+Pillow>=10

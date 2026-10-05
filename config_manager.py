@@ -32,11 +32,19 @@ DEFAULTS = {
     "role": "accueil",            # accueil | dedie | medecin
     "services": [],               # codes de services (poste dédié / médecin)
     "station_name": "",
-    "config_version": 2,
+    "config_version": 3,
     "revisit_check_hours": 72,   # patient récurrent : 72 h
     "doc_printer": "",            # imprimante A4 (ordonnances, demandes)
     "printer": "",                # "" = défaut Windows, "__PDF__" = fichier PDF, sinon nom de l'imprimante
     "paper_width_mm": 80,
+    "room_label": "",             # libellé du bureau affiché sur l'écran TV (ex : « Cabinet dentaire »)
+    "tv_screen": "",              # écran TV rattaché à ce poste (identifiant), "" = aucun
+    "tv_autostart": False,
+    "hub_tls": False,             # HTTPS / TLS 1.3 pour les appels de données (certificat auto-signé épinglé)
+    "hub_tls_port": 5443,
+    "hub_cert_pem": "",
+    "tpl_ordonnance": "", "tpl_bilan": "", "tpl_imagerie": "", "tpl_margins_mm": "50,15,15,25",
+    "sync_enabled": False, "sync_endpoint": "", "sync_token": "",
     "net_mode": "local",          # local | hub | client
     "hub_host": "",
     "hub_port": 5000,
@@ -68,6 +76,10 @@ class Config:
         try:
             with open(self.path, encoding="utf-8") as f:
                 loaded = json.load(f)
+            if loaded.get("config_version", 1) < 3:        # v1.1.0 -> v1.2.0 : le rôle du poste ne dépend plus de l'utilisateur
+                if loaded.get("role") in ("medecin", "radio", "pharmacie"):
+                    loaded["role"] = "accueil"
+                loaded["config_version"] = 3
             if loaded.get("config_version", 1) < 2:        # v1.0.0 -> v1.1.0
                 if loaded.get("revisit_check_hours", 24) == 24:
                     loaded["revisit_check_hours"] = 72

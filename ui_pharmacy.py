@@ -1,4 +1,6 @@
 """Poste Pharmacie : file de transit des ordonnances + validation par scan du QR Code (lecteur USB = saisie clavier)."""
+import html
+
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
                              QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout)
@@ -7,8 +9,6 @@ from ui_common import BaseWindow, guard
 
 
 class PharmacyWindow(BaseWindow):
-    USER_ROLES = ("pharmacie",)
-
     def __init__(self, cfg, db):
         super().__init__(cfg, db)
         self.cur_rx, self._queue = None, []
@@ -27,7 +27,7 @@ class PharmacyWindow(BaseWindow):
 
         right = QFrame(); right.setObjectName("card"); rv = QVBoxLayout(right)
         h = QLabel("Validation de l'ordonnance"); h.setStyleSheet("font-size:18px;font-weight:700;")
-        self.scan = QLineEdit(); self.scan.setPlaceholderText("Scannez le QR Code (ou saisissez le code imprimé) puis Entrée")
+        self.scan = QLineEdit(); self.scan.setPlaceholderText("Scannez le QR Code ou le code-barres (ou saisissez le N° d'ordonnance) puis Entrée")
         self.scan.returnPressed.connect(self.lookup)
         self.verdict = QLabel(""); self.verdict.setWordWrap(True); self.verdict.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.info = QLabel(""); self.info.setWordWrap(True)
@@ -48,7 +48,7 @@ class PharmacyWindow(BaseWindow):
     def refresh(self, *_):
         if not self.user:
             return
-        self._queue = self.db.pharmacy_queue()
+        self._queue = self.db.pharmacy_queue(self.user["id"])
         if self._banner_kind == "error":
             self.hide_banner()
         self.queue.setRowCount(len(self._queue))
@@ -63,7 +63,7 @@ class PharmacyWindow(BaseWindow):
 
     @guard
     def lookup(self, *_):
-        res = self.db.pharmacy_lookup(self.scan.text())
+        res = self.db.pharmacy_lookup(self.scan.text(), self.user["id"])
         self.scan.clear(); self.scan.setFocus()
         self.cur_rx = res.get("rx") if res.get("found") else None
         self.items.setRowCount(0); self.info.setText(""); self.btn.setEnabled(False)
@@ -80,9 +80,10 @@ class PharmacyWindow(BaseWindow):
             self.verdict.setStyleSheet("background:#27ae60;color:white;font-size:20px;font-weight:700;padding:12px;border-radius:8px;")
             self.verdict.setText("✅ ORDONNANCE AUTHENTIQUE")
         rx, p, d = self.cur_rx, self.cur_rx["patient"], self.cur_rx["doctor"]
-        self.info.setText(f"<b>{p['last_name']} {p['first_name']}</b><br>Médecin : Dr {d['last_name'] + ' ' + d['first_name'] if d else '—'}"
-                          f"<br>Établie le {rx['created_at']}<br>Statut : <b>{rx['status']}</b>"
-                          + (f" — délivrée le {rx['dispensed_at']}" if rx["status"] == "DISPENSED" else ""))
+        e = html.escape                                   # jamais de HTML issu des données (défense contre l'injection d'affichage)
+        self.info.setText(f"<b>{e(p['last_name'] or '')} {e(p['first_name'] or '')}</b><br>Ordonnance n° {e(rx['number'])} — Médecin : Dr "
+                          f"{e(d['last_name'] + ' ' + d['first_name']) if d else '—'}<br>Établie le {e(rx['created_at'])}<br>Statut : <b>{e(rx['status'])}</b>"
+                          + (f" — délivrée le {e(rx['dispensed_at'])}" if rx["status"] == "DISPENSED" else ""))
         self.items.setRowCount(len(rx["items"]))
         for i, it in enumerate(rx["items"]):
             for j, k in enumerate(("drug", "dosage", "duration")):

@@ -71,23 +71,6 @@ def flag_pixmap(d):
     return pix
 
 
-def _placeholder(d):
-    pix = _blank(d)
-    pt = _painter(pix)
-    pt.setPen(Qt.PenStyle.NoPen)
-    pt.setBrush(QColor("white"))
-    pt.drawEllipse(0, 0, d, d)
-    pt.setBrush(QColor(GREEN))
-    pt.drawRect(QRectF(d * 0.28, d * 0.42, d * 0.44, d * 0.16))
-    pt.drawRect(QRectF(d * 0.42, d * 0.28, d * 0.16, d * 0.44))
-    pt.setBrush(Qt.BrushStyle.NoBrush)
-    pt.setPen(QPen(QColor(GREEN), d * 0.05))
-    pt.drawEllipse(QRectF(d * 0.04, d * 0.04, d * 0.92, d * 0.92))
-    _ring(pt, d)
-    pt.end()
-    return pix
-
-
 def logo_path():
     for p in (os.path.join(data_dir(), "assets", "logo_ministere.png"), resource_path(os.path.join("assets", "logo_ministere.png"))):
         if os.path.isfile(p):
@@ -96,11 +79,11 @@ def logo_path():
 
 
 def ministry_pixmap(d):
-    """Logo officiel (assets/logo_ministere.png) rogné en cercle, de la même taille que le drapeau ; badge provisoire sinon."""
+    """Logo officiel (assets/logo_ministere.png) rogné en cercle, de la même taille que le drapeau ; None s'il n'a pas été fourni."""
     p = logo_path()
     src = QPixmap(p) if p else QPixmap()
     if src.isNull():
-        return _placeholder(d)
+        return None
     pix = _blank(d)
     pt = _painter(pix)
     _clip_circle(pt, d)
@@ -112,24 +95,48 @@ def ministry_pixmap(d):
     return pix
 
 
+def import_logo(src_path):
+    """Enregistre le logo officiel fourni (PNG/JPG) dans le dossier de données : actif immédiatement, sans réinstaller."""
+    img = QPixmap(src_path)
+    if img.isNull():
+        raise ValueError("Image illisible.")
+    folder = os.path.join(data_dir(), "assets")
+    os.makedirs(folder, exist_ok=True)
+    img.scaled(600, 600, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation).save(os.path.join(folder, "logo_ministere.png"), "PNG")
+
+
 def print_resources(d=220):
     """Images nommées utilisables dans le HTML des documents imprimés (<img src="drapeau">)."""
-    return {"logo_ministere": ministry_pixmap(d), "drapeau": flag_pixmap(d)}
+    res = {"drapeau": flag_pixmap(d)}
+    logo = ministry_pixmap(d)
+    if logo is not None:
+        res["logo_ministere"] = logo
+    return res
+
+
+def establishment(cfg):
+    return " - ".join(x for x in (cfg.get("parent", ""), cfg.get("structure", "")) if x)
 
 
 class HeaderBar(QFrame):
-    """Bandeau officiel affiché en haut de toutes les vues."""
+    """Bandeau officiel affiché en haut de toutes les vues : logo (gauche), République / Ministère / établissement (centre), drapeau (droite)."""
     def __init__(self, cfg=None, d=64):
         super().__init__()
         self.setObjectName("card")
         h = QHBoxLayout(self)
         left, right = QLabel(), QLabel()
-        for lab, pix in ((left, ministry_pixmap(d)), (right, flag_pixmap(d))):
-            lab.setPixmap(pix); lab.setFixedSize(d, d)
+        logo = ministry_pixmap(d)
+        if logo is not None:
+            left.setPixmap(logo)
+        right.setPixmap(flag_pixmap(d))
+        for lab in (left, right):
+            lab.setFixedSize(d, d)
         mid = QVBoxLayout()
-        a, b = QLabel(TITLE), QLabel(MINISTRY)
-        a.setStyleSheet(f"font-size:{max(12, d // 4)}px;font-weight:700;")
-        b.setStyleSheet(f"font-size:{max(11, d // 4 - 1)}px;font-weight:600;color:#8b97a7;")
-        for w in (a, b):
-            w.setAlignment(Qt.AlignmentFlag.AlignCenter); mid.addWidget(w)
+        lines = [(TITLE, f"font-size:{max(12, d // 4)}px;font-weight:700;"), (MINISTRY, f"font-size:{max(11, d // 4 - 1)}px;font-weight:600;color:#8b97a7;")]
+        name = establishment(cfg) if cfg is not None else ""
+        if name:
+            lines.append((name, f"font-size:{max(12, d // 4)}px;font-weight:800;color:#4f9dff;"))
+        for text, style in lines:
+            lab = QLabel(text); lab.setStyleSheet(style); lab.setAlignment(Qt.AlignmentFlag.AlignCenter); lab.setTextFormat(Qt.TextFormat.PlainText)
+            mid.addWidget(lab)
         h.addWidget(left); h.addLayout(mid, 1); h.addWidget(right)

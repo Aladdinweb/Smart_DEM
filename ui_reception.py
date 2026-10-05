@@ -13,6 +13,7 @@ from database import FMT, birth_text, display_name, parse_age_or_birth
 from printer import print_ticket
 from styles import TRIAGE_COLORS, TRIAGE_ICON, TRIAGE_TEXT
 from ui_common import BaseWindow, guard
+from ui_dpi import PatientSearchDialog
 
 
 class EditDialog(QDialog):
@@ -22,7 +23,7 @@ class EditDialog(QDialog):
         self.setWindowTitle(f"Modifier — {row['ticket_label']}")
         f = QFormLayout(self)
         self.last = QLineEdit(row.get("last_name") or row["full_name"]); self.first = QLineEdit(row.get("first_name") or "")
-        self.age = QLineEdit(birth_text(row))
+        self.age = QLineEdit(birth_text(row)); self.ident = QLineEdit(row.get("patient_ident") or "")
         self.gender = QComboBox(); self.gender.addItem("Homme", "H"); self.gender.addItem("Femme", "F")
         self.gender.setCurrentIndex(0 if row["gender"] == "H" else 1)
         self.service = QComboBox()
@@ -35,7 +36,7 @@ class EditDialog(QDialog):
         self.triage.setCurrentIndex(max(0, self.triage.findData(row["triage_level"] or "VERT")))
         self.service.currentIndexChanged.connect(self._sync)
         f.addRow("Nom :", self.last); f.addRow("Prénom :", self.first); f.addRow("Âge / Date de naissance :", self.age)
-        f.addRow("Genre :", self.gender); f.addRow("Service :", self.service); f.addRow("Niveau de tri :", self.triage)
+        f.addRow("N° d'identification :", self.ident); f.addRow("Genre :", self.gender); f.addRow("Service :", self.service); f.addRow("Niveau de tri :", self.triage)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self._ok); bb.rejected.connect(self.reject); f.addRow(bb)
         self._sync()
@@ -50,11 +51,33 @@ class EditDialog(QDialog):
 
     def values(self):
         return {"last_name": self.last.text(), "first_name": self.first.text(), "parsed": parse_age_or_birth(self.age.text()),
-                "gender": self.gender.currentData(), "service_code": self.service.currentData(), "triage": self.triage.currentData()}
+                "gender": self.gender.currentData(), "service_code": self.service.currentData(), "triage": self.triage.currentData(),
+                "ident": self.ident.text().strip()}
+
+
+class TvControlDialog(QDialog):
+    """L'accueil pilote le flux d'affichage des écrans TV (annonce défilante, pause, effacement) sans toucher aux sessions des médecins."""
+    def __init__(self, db, user_id, parent=None):
+        super().__init__(parent)
+        self.db, self.uid = db, user_id
+        self.setWindowTitle("Écrans TV — flux d'affichage"); self.resize(520, 260)
+        v = QVBoxLayout(self)
+        st = db.tv_state()
+        v.addWidget(QLabel("Annonce défilante affichée en bas des écrans (facultatif) :"))
+        self.msg = QLineEdit(st["message"]); self.msg.setMaxLength(200); v.addWidget(self.msg)
+        self.pause = QCheckBox("⏸ Mettre l'affichage des appels en pause (les écrans montrent l'annonce)"); self.pause.setChecked(st["paused"]); v.addWidget(self.pause)
+        b = QPushButton("✅ Appliquer"); b.setObjectName("primary"); b.clicked.connect(self.apply); v.addWidget(b)
+        c = QPushButton("🧹 Effacer l'historique des appels affichés"); c.clicked.connect(lambda *_: self.db.tv_clear(self.uid)); v.addWidget(c)
+
+    def apply(self):
+        try:
+            self.db.tv_set(self.msg.text(), self.pause.isChecked(), self.uid)
+        except (ConnectionError, PermissionError) as e:
+            QMessageBox.warning(self, "Écrans TV", str(e)); return
+        self.accept()
 
 
 class ReceptionWindow(BaseWindow):
-    USER_ROLES = ("accueil", "radio")
 
     def __init__(self, cfg, db):
         super().__init__(cfg, db)
@@ -62,8 +85,8 @@ class ReceptionWindow(BaseWindow):
             self.codes = [s["code"] for s in SERVICES]
         else:
             self.codes = [c for c in cfg.get("services", []) if c in SERVICE_BY_CODE]
-        b = QPushButton("🔄 Réinitialiser les compteurs"); b.clicked.connect(self.reset_counters)
-        self.header_extra.addWidget(b)
+        for label, fn in (("🔎 Dossiers patients", self.open_dpi), ("📺 Écrans TV", self.open_tv_control), ("🔄 Réinitialiser les compteurs", self.reset_counters)):
+            b = QPushButton(label); b.clicked.connect(fn); self.header_extra.addWidget(b)
         body = QHBoxLayout(); self.content.addLayout(body, 1)
         body.addWidget(self._build_form(), 5)
         body.addWidget(self._build_history(), 6)
@@ -71,6 +94,16 @@ class ReceptionWindow(BaseWindow):
         sf = QFrame(); sf.setObjectName("card"); QHBoxLayout(sf).addWidget(self.stats)
         self.content.addWidget(sf)
         self.reset_form()
+
+    @guard
+    def open_dpi(self, *_):
+        if self.user:
+            PatientSearchDialog(self.db, self.user, self.cfg, self).exec()
+
+    @guard
+    def open_tv_control(self, *_):
+        if self.user:
+            TvControlDialog(self.db, self.user["id"], self).exec()
 
     def hours(self):
         return int(self.cfg.get("revisit_check_hours", 72))
@@ -88,7 +121,8 @@ class ReceptionWindow(BaseWindow):
         self.first_edit = QLineEdit(); self.first_edit.setPlaceholderText("Prénom")
         names.addWidget(self.last_edit); names.addWidget(self.first_edit); v.addLayout(names)
         self.age_edit = QLineEdit(); self.age_edit.setPlaceholderText("Âge (ex : 35) ou date de naissance (jj/mm/aaaa)")
-        v.addWidget(self.age_edit)
+        self.ident_edit = QLineEdit(); self.ident_edit.setPlaceholderText("N° d'identification (carte d'identité, dossier…) — facultatif")
+        v.addWidget(self.age_edit); v.addWidget(self.ident_edit)
         gl = QHBoxLayout()
         self.gender_group = QButtonGroup(self)
         self.btn_h, self.btn_f = QPushButton("&Homme"), QPushButton("&Femme")
@@ -102,9 +136,9 @@ class ReceptionWindow(BaseWindow):
             items = [s for s in SERVICES if s["cat"] == cat and s["code"] in self.codes]
             if not items:
                 continue
-            box = QGroupBox(cat); grid = QGridLayout(box)
+            box = QGroupBox(cat.replace("&", "&&")); grid = QGridLayout(box)
             for i, s in enumerate(items):
-                sb = QPushButton(f"{s['icon']}  {s['name']}")
+                sb = QPushButton(f"{s['icon']}  {s['name']}".replace("&", "&&"))
                 sb.setCheckable(True); sb.setProperty("service", True); sb.setProperty("code", s["code"])
                 self.service_group.addButton(sb); grid.addWidget(sb, i // 2, i % 2)
             v.addWidget(box)
@@ -122,7 +156,7 @@ class ReceptionWindow(BaseWindow):
         save = QPushButton("🖨  Enregistrer && Imprimer le Ticket   (Entrée)"); save.setObjectName("primary")
         save.clicked.connect(self.submit); v.addWidget(save)
 
-        for w in (self.last_edit, self.first_edit, self.age_edit):
+        for w in (self.last_edit, self.first_edit, self.age_edit, self.ident_edit):
             w.returnPressed.connect(self.submit)
         self.age_edit.editingFinished.connect(self.check_live)
         self.first_edit.editingFinished.connect(self.check_live)
@@ -146,7 +180,7 @@ class ReceptionWindow(BaseWindow):
         self.check_live()
 
     def reset_form(self):
-        self.last_edit.clear(); self.first_edit.clear(); self.age_edit.clear()
+        self.last_edit.clear(); self.first_edit.clear(); self.age_edit.clear(); self.ident_edit.clear()
         self._uncheck(self.gender_group)
         if len(self.service_group.buttons()) == 1:
             self.service_group.buttons()[0].setChecked(True)
@@ -184,7 +218,8 @@ class ReceptionWindow(BaseWindow):
         # Alerte purement informative : n'empêche JAMAIS l'enregistrement.
         rev = self.db.find_revisit(last, first, gender, parsed, self.hours())
         row = self.db.add_admission({"last_name": last, "first_name": first, "parsed": parsed, "gender": gender,
-                                     "service_code": svc["code"], "triage": triage, "user_id": self.user["id"]}, self.station)
+                                     "service_code": svc["code"], "triage": triage, "user_id": self.user["id"],
+                                     "ident": self.ident_edit.text().strip()}, self.station)
         ok, msg = print_ticket(self.cfg, row)          # impression silencieuse + PDF automatique
         try:
             archive_reception(row)                      # archivage automatique du dossier d'accueil
@@ -260,7 +295,8 @@ class ReceptionWindow(BaseWindow):
         row = self.db.get(aid)
         dlg = EditDialog(row, self.codes if row["service_code"] in self.codes else self.codes + [row["service_code"]], self)
         if dlg.exec():
-            new = self.db.update_admission(aid, dlg.values(), self.station)
+            vals = dlg.values(); vals["user_id"] = self.user["id"]
+            new = self.db.update_admission(aid, vals, self.station)
             try:
                 archive_reception(new)
             except OSError:
@@ -296,6 +332,6 @@ class ReceptionWindow(BaseWindow):
         m = QMessageBox.question(self, "Nouvelle garde",
                                  "Remettre tous les compteurs à zéro (début de garde) ?\nL'historique est conservé.")
         if m == QMessageBox.StandardButton.Yes:
-            self.db.reset_shift(self.station)
+            self.db.reset_shift(self.station, self.user["id"])
             self.refresh()
             self.show_banner("Compteurs remis à zéro : nouvelle garde démarrée.")

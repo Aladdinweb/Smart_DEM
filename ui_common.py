@@ -1,18 +1,20 @@
-"""Fenêtre de base : en-tête officiel, session utilisateur (PIN), bannière, fermeture protégée par le PIN admin."""
-import functools, sys
+"""Fenêtre de base : en-tête officiel, identité de l'utilisateur, déconnexion, bannières temporisées, fermeture protégée par le PIN admin."""
+import functools, os, sys
 from datetime import datetime
 
-from PyQt6.QtCore import QProcess, QTimer
-from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
-                             QMessageBox, QPushButton, QVBoxLayout, QWidget)
+from PyQt6.QtCore import QProcess, QTimer, QUrl
+from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
+                             QPushButton, QVBoxLayout, QWidget)
 
 from branding import HeaderBar
+from config_manager import data_dir
 from data_structures import SERVICE_BY_CODE
 from database import FMT
 
-ROLE_LABELS = {"accueil": "Accueil Général", "dedie": "Poste Dédié", "medecin": "Poste Médecin",
-               "radio": "Poste Radiologie", "pharmacie": "Poste Pharmacie"}
-USER_ROLE_LABELS = {"accueil": "Accueil", "medecin": "Médecin", "radio": "Manipulateur radio", "pharmacie": "Pharmacien"}
+ROLE_LABELS = {"accueil": "Accueil Général", "dedie": "Accueil dédié"}
+USER_ROLE_LABELS = {"accueil": "Accueil", "medecin": "Médecin", "radio": "Manipulateur radio", "pharmacie": "Pharmacien", "labo": "Laboratoire"}
+BANNER_MS = {"info": 4000, "error": 6000, "revisit": 10000}      # les bannières se masquent seules (3 à 10 s)
 
 
 def user_label(u):
@@ -21,7 +23,7 @@ def user_label(u):
 
 
 def guard(fn):
-    """Une panne du Hub (ConnectionError) s'affiche en bannière au lieu de faire planter l'application.
+    """Une panne du Hub (ConnectionError) ou un refus d'accès s'affichent en bannière au lieu de faire planter l'application.
     Les méthodes protégées acceptent *_ car Qt leur passe des arguments de signal."""
     @functools.wraps(fn)
     def wrapper(self, *a, **k):
@@ -29,6 +31,8 @@ def guard(fn):
             return fn(self, *a, **k)
         except ConnectionError as e:
             self.show_banner(f"⚠️ {e}", "error")
+        except PermissionError as e:
+            self.show_banner(f"⛔ {e}", "error")
     return wrapper
 
 
@@ -38,6 +42,21 @@ def restart_app():
     QApplication.quit()
 
 
+def quit_now():
+    """Ferme l'application pour de bon (la mise à jour attend la fin du processus) : quit() puis arrêt forcé de secours."""
+    QApplication.quit()
+    QTimer.singleShot(2500, lambda: os._exit(0))
+
+
+def tv_url(cfg, screen=""):
+    host = "127.0.0.1" if cfg.get("net_mode") != "client" else cfg.get("hub_host", "127.0.0.1")
+    return f"http://{host}:{cfg.get('hub_port', 5000)}/tv" + (f"?screen={screen}" if screen else "")
+
+
+def open_tv(cfg):
+    QDesktopServices.openUrl(QUrl(tv_url(cfg, cfg.get("tv_screen", ""))))
+
+
 def revisit_text(row):
     dt = datetime.strptime(row["created_at"], FMT)
     svc = SERVICE_BY_CODE.get(row["service_code"], {}).get("name", row["service_code"])
@@ -45,13 +64,13 @@ def revisit_text(row):
 
 
 class BaseWindow(QMainWindow):
-    USER_ROLES = ()          # rôles utilisateurs autorisés à ouvrir une session sur ce poste
-
     def __init__(self, cfg, db):
         super().__init__()
         self.cfg, self.db = cfg, db
         self.station = cfg.get("station_name", "")
+        self.room = cfg.get("room_label", "") or self.station          # libellé du bureau affiché sur l'écran TV
         self.user = None
+        self.logout_cb = None
         self._allow_close = False
         self._banner_kind = None
         self.setWindowTitle("Smart DEM")
@@ -68,20 +87,22 @@ class BaseWindow(QMainWindow):
         self.root.addWidget(self.content_widget, 1)
         self.banner = QLabel()
         self.banner.setWordWrap(True)
+        self.banner.setTextFormat(Qt_PlainText())
         self.banner.hide()
         self.root.addWidget(self.banner)
+        self._banner_timer = QTimer(self); self._banner_timer.setSingleShot(True); self._banner_timer.timeout.connect(self.hide_banner)
         if cfg.get("auto_update_check", True):
             QTimer.singleShot(6000, self._auto_update_check)
+        QTimer.singleShot(2500, self._check_update_result)
 
     def _build_header(self):
         f = QFrame(); f.setObjectName("card")
         h = QHBoxLayout(f)
-        box = QVBoxLayout()
-        t = QLabel(self.cfg.get("parent", "")); t.setStyleSheet("font-size:18px;font-weight:700;")
-        self.sub = QLabel(f"{self.cfg.get('structure', '')}  •  {ROLE_LABELS.get(self.cfg.get('role'), '')}  •  {self.station}")
+        self.user_chip = QLabel("")
+        self.user_chip.setStyleSheet("font-size:16px;font-weight:700;color:#4f9dff;"); self.user_chip.setTextFormat(Qt_PlainText())
+        self.sub = QLabel(f"{ROLE_LABELS.get(self.cfg.get('role'), '')}  •  {self.station}")
         self.sub.setStyleSheet("color:#8b97a7;")
-        self.user_chip = QLabel("🔒 Session verrouillée"); self.user_chip.setStyleSheet("font-weight:700;color:#4f9dff;")
-        box.addWidget(t); box.addWidget(self.sub); box.addWidget(self.user_chip)
+        box = QVBoxLayout(); box.addWidget(self.user_chip); box.addWidget(self.sub)
         h.addLayout(box, 1)
         self.header_extra = QHBoxLayout()
         h.addLayout(self.header_extra)
@@ -92,47 +113,24 @@ class BaseWindow(QMainWindow):
             h.addWidget(b)
         return f
 
-    # ---------- session (PIN) ----------
-    def start_session(self):
-        if not self.login():
-            self._allow_close = True
-            self.close()
+    # ---------- session ----------
+    def set_user(self, user):
+        self.user = user
+        extra = f" — {user['specialty']}" if user.get("specialty") else ""
+        self.user_chip.setText(f"👤 {user_label(user)}  •  {USER_ROLE_LABELS.get(user['role'], '')}{extra}")
 
-    def _update_chip(self):
-        if self.user:
-            extra = f" — {self.user['specialty']}" if self.user.get("specialty") else ""
-            self.user_chip.setText(f"👤 {user_label(self.user)}  •  {USER_ROLE_LABELS.get(self.user['role'], '')}{extra}")
-        else:
-            self.user_chip.setText("🔒 Session verrouillée")
-
-    def login(self):
-        """Verrouille l'écran puis demande le PIN. Retourne False si l'application doit se fermer."""
-        from ui_login import LoginDialog
-        self.user = None
-        self._update_chip()
-        self.content_widget.setVisible(False)
-        while True:
-            dlg = LoginDialog(self.cfg, self.db, self.USER_ROLES, self)
-            res = dlg.exec()
-            if dlg.quit_requested:
-                return False
-            if res == QDialog.DialogCode.Accepted and dlg.user:
-                break
-        self.user = dlg.user
-        self._update_chip()
-        self.content_widget.setVisible(True)
-        self.on_login()
+    def before_logout(self):
+        """À surcharger : retourne False pour annuler la déconnexion (ex. consultation en cours)."""
         return True
 
     def logout(self, *_):
-        if not self.login():
-            self._allow_close = True
-            self.close()
+        if self.before_logout() and self.logout_cb:
+            self.logout_cb()
 
     def on_login(self):
         """À surcharger : rafraîchir le poste pour l'utilisateur qui vient de se connecter."""
 
-    # ---------- mises à jour GitHub (vérification discrète) ----------
+    # ---------- mises à jour ----------
     def _auto_update_check(self):
         from ui_update import CheckThread
         from version import GITHUB_REPO
@@ -142,26 +140,45 @@ class BaseWindow(QMainWindow):
 
     def _on_auto_update(self, info, err):
         if info and info.get("available") and not self.banner.isVisible():
-            self.show_banner(f"🔔 Nouvelle version v{info['version']} disponible — Paramètres › Sécurité & Mises à Jour.")
+            self.show_banner(f"🔔 Nouvelle version v{info['version']} disponible — Paramètres › Sécurité & Mises à Jour.", ms=10000)
 
-    # ---------- bannière non bloquante ----------
-    def show_banner(self, text, kind="info"):
+    def _check_update_result(self):
+        """Résultat de la dernière mise à jour (écrit par le script de mise à jour après la fermeture)."""
+        p = os.path.join(data_dir(), "update_result.txt")
+        if not os.path.isfile(p):
+            return
+        try:
+            with open(p, encoding="utf-8", errors="ignore") as f:
+                txt = f.read().strip()
+            os.remove(p)
+        except OSError:
+            return
+        from version import __version__
+        if txt.startswith("OK"):
+            self.show_banner(f"✅ Mise à jour appliquée — version installée : v{__version__}.", ms=8000)
+        else:
+            self.show_banner(f"⚠️ La dernière mise à jour n'a pas pu être appliquée ({txt}). Réinstallez avec Smart_DEM_Setup.exe "
+                             "(GitHub Releases) : vos données sont conservées.", "error", ms=20000)
+
+    # ---------- bannière temporisée ----------
+    def show_banner(self, text, kind="info", ms=None):
         style = {"info": "background:#f5b041;color:#1b1b1b;", "error": "background:#c0392b;color:white;"}[kind]
         self.banner.setStyleSheet(style + "font-weight:600;padding:10px 14px;border-radius:8px;")
         self.banner.setText(text)
         self.banner.show()
         self._banner_kind = kind if kind == "error" else "info"
+        self._banner_timer.start(ms or BANNER_MS[kind])             # masquage automatique (QTimer)
 
     def show_revisit(self, row):
-        self.show_banner(revisit_text(row))
+        self.show_banner(revisit_text(row), ms=BANNER_MS["revisit"])
         self._banner_kind = "revisit"
 
     def clear_revisit_banner(self):
         if self._banner_kind == "revisit":
-            self.banner.hide(); self._banner_kind = None
+            self.hide_banner()
 
     def hide_banner(self):
-        self.banner.hide(); self._banner_kind = None
+        self._banner_timer.stop(); self.banner.hide(); self._banner_kind = None
 
     # ---------- sécurité administrateur ----------
     def ask_pin(self, title):
@@ -178,7 +195,7 @@ class BaseWindow(QMainWindow):
     def request_quit(self, *_):
         if self.ask_pin("Fermeture de l'application"):
             self._allow_close = True
-            self.close()
+            QApplication.quit()
 
     def closeEvent(self, event):
         if self._allow_close:
@@ -192,3 +209,8 @@ class BaseWindow(QMainWindow):
             return
         from ui_settings import SettingsDialog
         SettingsDialog(self.cfg, self.db, self).exec()
+
+
+def Qt_PlainText():
+    from PyQt6.QtCore import Qt
+    return Qt.TextFormat.PlainText

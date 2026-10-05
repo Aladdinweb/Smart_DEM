@@ -45,7 +45,8 @@ jobs:
           pyinstaller --noconfirm --windowed --name Smart_DEM
           --add-data "schema.sql;."
           --add-data "assets;assets"
-          --hidden-import simple_websocket --hidden-import wsproto --hidden-import h11 --hidden-import segno
+          --icon assets\smart_dem.ico
+          --hidden-import simple_websocket --hidden-import wsproto --hidden-import h11 --hidden-import segno --collect-submodules cryptography --hidden-import PIL
           main.py
 
       - name: Paquet de mise à jour (ZIP) + SHA-256

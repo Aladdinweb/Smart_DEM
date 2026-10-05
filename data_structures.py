@@ -75,8 +75,14 @@ SERVICES = [
     dict(code="DIAB", prefix="DIA", icon="🩸", name="Diabétologie & Endocrinologie", cat=CAT_SPE, triage=False),
     dict(code="NUT", prefix="NUT", icon="🥗", name="Nutrition", cat=CAT_SPE, triage=False),
     dict(code="OPT", prefix="OPT", icon="👓", name="Opticien / Optométrie", cat=CAT_SPE, triage=False),
+    dict(code="PSY", prefix="PSY", icon="🧠", name="Psychologie", cat=CAT_SPE, triage=False),
     dict(code="SOINS", prefix="SOI", icon="💉", name="Salle de Soins", cat=CAT_EXA, triage=False),
     dict(code="LAB", prefix="LAB", icon="🧪", name="Laboratoire d'Analyses", cat=CAT_EXA, triage=False),
+    dict(code="LABP", prefix="LBP", icon="🧬", name="Laboratoire — Bilans prédictifs", cat=CAT_EXA, triage=False),
     dict(code="RAD", prefix="RAD", icon="🩻", name="Radiologie", cat=CAT_EXA, triage=False),
 ]
+SERVICE_COLORS = {"URG": "#e74c3c", "MG": "#3498db", "PED": "#f39c12", "DENT": "#1abc9c", "DIAB": "#9b59b6", "NUT": "#2ecc71",
+                  "OPT": "#95a5a6", "PSY": "#e91e63", "LABP": "#ab47bc", "SOINS": "#e67e22", "LAB": "#8e44ad", "RAD": "#00bcd4", "BIO": "#8e44ad"}
 SERVICE_BY_CODE = {s["code"]: s for s in SERVICES}
+
+CONSULT_SERVICES = ["URG", "MG", "PED", "DENT", "DIAB", "NUT", "OPT", "PSY"]   # services tenus par des médecins / spécialistes
