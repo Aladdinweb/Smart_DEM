@@ -11,8 +11,60 @@ from database import Database, now
 from styles import stylesheet
 
 # Routage par rôle : un utilisateur n'ouvre QUE l'espace de son rôle (aucune navigation vers les autres espaces).
-WINDOWS = {"accueil": ("ui_reception", "ReceptionWindow"), "medecin": ("ui_doctor", "DoctorWindow"), "radio": ("ui_radio", "RadioWindow"),
-           "pharmacie": ("ui_pharmacy", "PharmacyWindow"), "labo": ("ui_lab", "LabWindow")}
+ROLES = ("accueil", "medecin", "radio", "pharmacie", "labo")
+
+
+def window_class(role):
+    """Classe de l'espace d'un rôle. IMPORTS STATIQUES OBLIGATOIRES : PyInstaller ne suit pas les imports dynamiques (importlib),
+    un import par nom de module laisserait ces fenêtres hors de l'exécutable (« No module named 'ui_reception' » à la connexion)."""
+    if role == "accueil":
+        from ui_reception import ReceptionWindow as W
+    elif role == "medecin":
+        from ui_doctor import DoctorWindow as W
+    elif role == "radio":
+        from ui_radio import RadioWindow as W
+    elif role == "pharmacie":
+        from ui_pharmacy import PharmacyWindow as W
+    elif role == "labo":
+        from ui_lab import LabWindow as W
+    else:
+        raise ValueError(f"Rôle inconnu : {role}")
+    return W
+
+
+def log_error(cfg, exc_type, exc, tb):
+    try:
+        with open(os.path.join(cfg.dir, "error.log"), "a", encoding="utf-8") as f:
+            f.write(f"[{now()}]\n{''.join(traceback.format_exception(exc_type, exc, tb))}\n")
+    except OSError:
+        pass
+
+
+def selftest(outfile):
+    """Auto-test de l'EXÉCUTABLE COMPILÉ (exécuté par la CI après PyInstaller) : chaque espace se construit et se connecte."""
+    import tempfile
+    tmp = tempfile.mkdtemp()
+    os.environ.update({"QT_QPA_PLATFORM": "offscreen", "LOCALAPPDATA": tmp, "HOME": tmp})
+    lines, ok = [], True
+    try:
+        app = QApplication(sys.argv)
+        cfg = Config(); cfg.set("auto_update_check", False)
+        db = Database(cfg.db_path)
+        for role in ROLES:
+            db.create_user(role.upper(), "Test", role, "", "1234", ["MG"] if role == "medecin" else [])
+            user = db.list_users(roles=[role])[0]
+            w = window_class(role)(cfg, db)
+            w.set_user(user); w.on_login(); w._allow_close = True; w.close()
+            lines.append(f"OK espace {role}")
+        import ui_settings, ui_dpi, ui_sigeditor, ui_login, hub_server, remote_db, github_updater, sync, reports, documents  # noqa
+        import printer, templates, barcode, qr, imgproc, fhir, tls, crypto  # noqa
+        lines.append("OK modules")
+    except Exception:
+        ok = False
+        lines.append("ECHEC\n" + traceback.format_exc())
+    with open(outfile, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return 0 if ok else 1
 
 
 def make_db(cfg):
@@ -63,13 +115,21 @@ class Controller(QObject):
         self.open_window(dlg.user)
 
     def open_window(self, user):
-        import importlib
-        mod, cls = WINDOWS[user["role"]]
-        self.win = getattr(importlib.import_module(mod), cls)(self.cfg, self.db)
-        self.win.logout_cb = self.on_logout
-        self.win.set_user(user)
-        self.win.showMaximized()
-        self.win.on_login()
+        win = None
+        try:
+            win = window_class(user["role"])(self.cfg, self.db)
+            win.logout_cb = self.on_logout
+            win.set_user(user)
+            win.showMaximized()
+            win.on_login()
+            self.win = win
+        except Exception as e:           # jamais d'application « fantôme » sans fenêtre : on le dit, on journalise, on revient à la connexion
+            log_error(self.cfg, type(e), e, e.__traceback__)
+            if win is not None:
+                win._allow_close = True; win.close(); win.deleteLater()
+            QMessageBox.critical(None, "Smart DEM", f"L'espace « {user['role']} » n'a pas pu s'ouvrir.\n\n{type(e).__name__} : {e}\n\n"
+                                 "Détail enregistré dans error.log (dossier %LOCALAPPDATA%\\Smart_DEM).")
+            QTimer.singleShot(0, self.next_login)
 
     def on_logout(self):
         w, self.win = self.win, None
@@ -110,6 +170,8 @@ def housekeeping(cfg, db, app):
 
 
 def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == "--selftest":
+        return selftest(sys.argv[2])
     faulthandler.enable(open(os.path.join(Config().dir, "crash.log"), "a"))     # trace des plantages natifs
     app = QApplication(sys.argv)
     app.setApplicationName("Smart DEM")
@@ -121,11 +183,7 @@ def main():
     shown = {"t": 0}
 
     def report(t, v, tb):   # exception globale : jamais de fermeture inattendue ; trace dans error.log, message discret
-        try:
-            with open(os.path.join(cfg.dir, "error.log"), "a", encoding="utf-8") as f:
-                f.write(f"[{now()}]\n{''.join(traceback.format_exception(t, v, tb))}\n")
-        except OSError:
-            pass
+        log_error(cfg, t, v, tb)
         if datetime.now().timestamp() - shown["t"] > 30:
             shown["t"] = datetime.now().timestamp()
             QTimer.singleShot(0, lambda: QMessageBox.warning(None, "Smart DEM", "Une erreur inattendue est survenue.\nL'application continue de fonctionner ; "

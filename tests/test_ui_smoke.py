@@ -93,7 +93,9 @@ class UiSmoke(unittest.TestCase):
         from ui_reception import ReceptionWindow
         from PyQt6.QtCore import Qt
         import main
-        self.assertEqual(set(main.WINDOWS), {"accueil", "medecin", "radio", "pharmacie", "labo"})        # routage par rôle
+        self.assertEqual(set(main.ROLES), {"accueil", "medecin", "radio", "pharmacie", "labo"})          # routage par rôle
+        for r in main.ROLES:
+            self.assertTrue(main.window_class(r).__name__.endswith("Window"))
         acc = self.user("accueil")
         rw = self.mk(ReceptionWindow, acc); rw.last_edit.setText("Said"); rw.first_edit.setText("Omar"); rw.age_edit.setText("40")
         rw.btn_h.setChecked(True); rw.service_group.buttons()[1].setChecked(True); rw.on_service_changed(); rw.submit()      # MG (triage)

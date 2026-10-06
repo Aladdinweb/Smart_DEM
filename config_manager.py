@@ -76,14 +76,12 @@ class Config:
         try:
             with open(self.path, encoding="utf-8") as f:
                 loaded = json.load(f)
-            if loaded.get("config_version", 1) < 3:        # v1.1.0 -> v1.2.0 : le rôle du poste ne dépend plus de l'utilisateur
-                if loaded.get("role") in ("medecin", "radio", "pharmacie"):
-                    loaded["role"] = "accueil"
-                loaded["config_version"] = 3
-            if loaded.get("config_version", 1) < 2:        # v1.0.0 -> v1.1.0
-                if loaded.get("revisit_check_hours", 24) == 24:
-                    loaded["revisit_check_hours"] = 72
-                loaded["config_version"] = 2
+            ver = loaded.get("config_version", 1)
+            if ver < 2 and loaded.get("revisit_check_hours", 24) == 24:      # v1.0.0 -> v1.1.0 : 24 h -> 72 h
+                loaded["revisit_check_hours"] = 72
+            if ver < 3 and loaded.get("role") in ("medecin", "radio", "pharmacie"):   # v1.2.0 : le rôle vient de l'utilisateur, pas du poste
+                loaded["role"] = "accueil"
+            loaded["config_version"] = max(ver, 3)
             self.data.update(loaded)
         except FileNotFoundError:
             pass

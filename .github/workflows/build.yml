@@ -32,7 +32,7 @@ jobs:
         run: pip install -r requirements.txt pyinstaller
 
       - name: Tests (données, migration, Hub, SemVer — bloquants)
-        run: python -m unittest tests.test_core -v
+        run: python -m unittest tests.test_core tests.test_packaging -v
 
       - name: Test de fumée de l'interface (Qt hors écran) — non bloquant pour l'instant
         continue-on-error: true      # passer à false une fois ce test vert de façon stable
@@ -48,6 +48,13 @@ jobs:
           --icon assets\smart_dem.ico
           --hidden-import simple_websocket --hidden-import wsproto --hidden-import h11 --hidden-import segno --collect-submodules cryptography --hidden-import PIL
           main.py
+
+      - name: Auto-test de l'exécutable COMPILÉ (chaque espace doit s'ouvrir) — bloquant
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\Smart_DEM\Smart_DEM.exe -ArgumentList "--selftest","$PWD\selftest.txt" -PassThru -Wait
+          if (Test-Path selftest.txt) { Get-Content selftest.txt } else { Write-Host "selftest.txt absent" }
+          if ($p.ExitCode -ne 0) { throw "Auto-test de l'exécutable en échec : un module manque dans le paquet ou une fenêtre ne s'ouvre pas" }
 
       - name: Paquet de mise à jour (ZIP) + SHA-256
         shell: pwsh
