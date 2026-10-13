@@ -4,7 +4,7 @@ from datetime import datetime
 
 from PyQt6.QtCore import QStringListModel, Qt, QTimer
 from PyQt6.QtGui import QColor, QKeySequence, QShortcut
-from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QCompleter, QFrame, QGridLayout, QHBoxLayout,
+from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QInputDialog, QCheckBox, QComboBox, QCompleter, QFrame, QGridLayout, QHBoxLayout,
                              QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea,
                              QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget)
 
@@ -15,7 +15,10 @@ from documents import build_lab_request, build_prescription, build_radio_request
 from medical_data import DURATIONS, EXAM_TYPES, LAB_ITEMS, POSOLOGIES, RADIO_STATUS, REGIONS, SIDES
 from printer import print_document
 from styles import TRIAGE_COLORS, TRIAGE_ICON, TRIAGE_TEXT
-from ui_common import BaseWindow, guard, open_tv
+import userdata
+from functions import ALERT_FUNCTIONS, format_vitals, honorific
+from ui_common import BaseWindow, HandoverDialog, guard, open_tv
+from ui_tv import AnnounceDialog
 from ui_dpi import PatientSearchDialog, ResultViewer
 from ui_login import ProfileDialog
 
@@ -33,7 +36,10 @@ class DoctorWindow(BaseWindow):
         self.services = []
         self.current = self.consult = self.rx = self.last_radio = None
         self.blink, self.row_triage, self._seen = False, [], {}
-        for label, fn in (("🔎 Dossiers patients", self.open_dpi), ("🖋 Mon profil", self.open_profile)):
+        self._last_draft = None
+        self.btn_hand = QPushButton("📥 Reprises (0)"); self.btn_hand.clicked.connect(self.open_handovers); self.header_extra.addWidget(self.btn_hand)
+        self.btn_alert = QPushButton("🚨 Alerte TV"); self.btn_alert.clicked.connect(self.open_alert); self.btn_alert.setVisible(False); self.header_extra.addWidget(self.btn_alert)
+        for label, fn in (("🔁 Relève de garde / Changer de compte", self.logout), ("🔎 Dossiers patients", self.open_dpi), ("🖋 Mon profil", self.open_profile)):
             b = QPushButton(label); b.clicked.connect(fn); self.header_extra.addWidget(b)
         if cfg.get("tv_screen"):
             b = QPushButton("📺 Ouvrir l'écran TV"); b.clicked.connect(lambda *_: open_tv(self.cfg)); self.header_extra.addWidget(b)
@@ -43,6 +49,7 @@ class DoctorWindow(BaseWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self.call_next)
         self.t_refresh = QTimer(self); self.t_refresh.timeout.connect(self.refresh); self.t_refresh.start(3000)
         self.t_blink = QTimer(self); self.t_blink.timeout.connect(self._blink); self.t_blink.start(600)
+        self.t_draft = QTimer(self); self.t_draft.timeout.connect(self.autosave); self.t_draft.start(4000)    # sauvegarde instantanée du brouillon
         self.set_current(None)
 
     def hours(self):
@@ -78,6 +85,7 @@ class DoctorWindow(BaseWindow):
             return
         sel = self.table.currentItem().data(Qt.ItemDataRole.UserRole) if self.table.currentItem() else None
         rows = self.db.queue(self.services, self.hours())
+        self._update_handover_btn()
         if self._banner_kind == "error":
             self.hide_banner()
         self.table.blockSignals(True)
@@ -131,12 +139,14 @@ class DoctorWindow(BaseWindow):
         self.cur_ticket = QLabel("—"); self.cur_ticket.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.cur_name = QLabel(""); self.cur_name.setAlignment(Qt.AlignmentFlag.AlignCenter); self.cur_name.setTextFormat(Qt.TextFormat.PlainText)
         self.cur_name.setStyleSheet("font-size:18px;"); self.cur_name.setWordWrap(True)
+        self.cur_vitals = QLabel(""); self.cur_vitals.setWordWrap(True); self.cur_vitals.setTextFormat(Qt.TextFormat.PlainText)
+        self.cur_vitals.setStyleSheet("background:#0e141b;border:1px solid #2c3644;border-radius:8px;padding:6px;")
         self.cur_badge = QLabel(BADGE); self.cur_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.cur_badge.setStyleSheet("background:#f39c12;color:#1b1b1b;font-weight:700;padding:6px;border-radius:8px;")
         nxt = QPushButton("📣  Appel Suivant   (Espace)"); nxt.setObjectName("primary"); nxt.clicked.connect(self.call_next)
-        rec = QPushButton("🔁 Rappeler"); rec.clicked.connect(self.recall)
+        rec = QPushButton("📢 Rappeler / répéter l'appel"); rec.clicked.connect(self.recall)
         row = QHBoxLayout(); row.addWidget(nxt, 3); row.addWidget(rec, 1)
-        for x in (h, self.cur_ticket, self.cur_name, self.cur_badge):
+        for x in (h, self.cur_ticket, self.cur_name, self.cur_badge, self.cur_vitals):
             cv.addWidget(x)
         cv.addLayout(row)
         v.addWidget(card)
@@ -243,6 +253,7 @@ class DoctorWindow(BaseWindow):
             return
         html, res = build_prescription(self.cfg, rx, self.current, self.doctor())
         ok, msg = print_document(self.cfg, html, res, "a4", "ordonnance_" + rx["number"], template_kind="ordonnance")
+        self.log("ordonnance", rx["number"])
         self.show_banner("Ordonnance : " + msg, "info" if ok else "error")
 
     @guard
@@ -295,6 +306,7 @@ class DoctorWindow(BaseWindow):
                                            self.r_info.toPlainText().strip(), self.r_instr.text().strip(), self.r_urgent.isChecked(),
                                            self.user["id"], self.station)
         self.last_radio = req
+        self.log("demande imagerie", req["ticket_label"])
         if self.r_paper.isChecked():
             self._print_radio(req)
         self.show_banner(f"📡 Demande envoyée à la Radiologie — numéro de passage {req['ticket_label']}.")
@@ -348,6 +360,7 @@ class DoctorWindow(BaseWindow):
         if self.lab_paper.isChecked():
             html, res = build_lab_request(self.cfg, lab, self.current, self.doctor())
             print_document(self.cfg, html, res, "a4", "bilan_" + lab["ticket_label"], template_kind="bilan")
+        self.log("demande laboratoire", lab["ticket_label"])
         self.show_banner(f"🧪 Demande envoyée au Laboratoire — {lab['ticket_label']}.")
         for i in range(self.lab_list.count()):
             self.lab_list.item(i).setCheckState(Qt.CheckState.Unchecked)
@@ -415,6 +428,8 @@ class DoctorWindow(BaseWindow):
             if QMessageBox.question(self, "Ordonnance", "Des lignes d'ordonnance n'ont été ni imprimées ni enregistrées.\nClôturer quand même ?") != QMessageBox.StandardButton.Yes:
                 return
         dossier = self.db.close_consultation(self.consult["id"], self.notes.toPlainText().strip(), self.diag.text().strip(), self.user["id"])
+        userdata.delete_draft(self.user, f"consult_{dossier['consultation']['admission_id']}")
+        self.log("clôture", dossier["patient"]["ticket_label"])
         try:
             archive_consultation(dossier)
             msg = "Consultation clôturée et archivée."
@@ -424,6 +439,61 @@ class DoctorWindow(BaseWindow):
         self.refresh()
         self.show_banner("✅ " + msg)
 
+    # ---------------- brouillon de consultation (relève de garde) ----------------
+    def collect_draft(self):
+        if not (self.current and self.consult):
+            return None
+        return {"items": [] if self.rx else self._items(), "rx_notes": self.rx_notes.text(), "diag": self.diag.text(), "notes": self.notes.toPlainText(),
+                "r_info": self.r_info.toPlainText(), "lab_other": self.lab_other.text(), "lab_info": self.lab_info.text()}
+
+    def apply_draft(self, d):
+        if self.rx:
+            return
+        for it in d.get("items", []):
+            r = self.rx_table.rowCount(); self.rx_table.insertRow(r)
+            for j, k in enumerate(("drug", "dosage", "duration")):
+                self.rx_table.setItem(r, j, _item(it.get(k, "")))
+        self.rx_notes.setText(d.get("rx_notes", "")); self.diag.setText(d.get("diag", "")); self.notes.setPlainText(d.get("notes", ""))
+        self.r_info.setPlainText(d.get("r_info", "")); self.lab_other.setText(d.get("lab_other", "")); self.lab_info.setText(d.get("lab_info", ""))
+
+    @guard
+    def autosave(self, *_):
+        """Enregistre le brouillon (base chiffrée + copie dans le dossier de l'agent) dès qu'il change."""
+        d = self.collect_draft() if self.user else None
+        if not d or not any(d.values()):
+            return
+        key = repr(sorted(d.items()))
+        if key == self._last_draft:
+            return
+        self.db.save_draft(self.current["id"], "consult", d, self.user["id"])
+        userdata.save_draft(self.user, f"consult_{self.current['id']}", d)
+        self._last_draft = key
+
+    # ---------------- relève de garde ----------------
+    def _services_hand(self):
+        return self.services
+
+    @guard
+    def open_handovers(self, *_):
+        if not self.user:
+            return
+        dlg = HandoverDialog(self.db, self.user, self.services, self)
+        if dlg.exec() and dlg.taken:
+            self.log("reprise", dlg.taken["ticket_label"])
+            self.set_current(self.db.get(dlg.taken["id"]))
+            self.show_banner(f"📥 Patient {dlg.taken['ticket_label']} repris — brouillon retrouvé.")
+
+    def _update_handover_btn(self):
+        n = len(self.db.handover_list(self.services, self.user["id"]))
+        self.btn_hand.setText(f"📥 Reprises ({n})")
+        self.btn_hand.setStyleSheet("background:#f39c12;color:#1b1b1b;font-weight:700;" if n else "")
+        return n
+
+    @guard
+    def open_alert(self, *_):
+        if self.user:
+            AnnounceDialog(self.db, self.user["id"], self).exec()
+
     # ---------------- patient courant ----------------
     def set_current(self, row):
         self.current, self.consult, self.last_radio = row, None, None
@@ -431,8 +501,16 @@ class DoctorWindow(BaseWindow):
         for x in (self.diag, self.notes, self.r_info):
             x.clear()
         self.radio_table.setRowCount(0); self.lab_table.setRowCount(0)
+        self._last_draft = None
+        self.cur_vitals.setVisible(False)
         if row and self.user:
             self.consult = self.db.start_consultation(row["id"], self.user["id"], self.station)
+            draft = self.db.get_draft(row["id"], "consult", self.user["id"])
+            if draft:
+                self.apply_draft(draft); self.show_banner("📝 Brouillon de consultation retrouvé.", ms=5000)
+            vit = self.db.vitals_for_admission(row["id"], self.user["id"])
+            if vit:
+                self.cur_vitals.setText("🩺 Constantes (" + (vit[0]["recorded_at"] or "")[11:16] + ") : " + format_vitals(vit[0])); self.cur_vitals.setVisible(True)
         self.cur_ticket.setText(row["ticket_label"] if row else "—")
         color = TRIAGE_COLORS.get(row["triage_level"], "") if row and row.get("triage_level") else ""
         self.cur_ticket.setStyleSheet(f"font-size:54px;font-weight:800;{'color:' + color + ';' if color else ''}")
@@ -445,24 +523,36 @@ class DoctorWindow(BaseWindow):
         self._seen = {}
         self._apply_specialty_defaults()
         self._load_drugs()
+        self.btn_alert.setVisible(self.user.get("function") in ALERT_FUNCTIONS)
         self.set_current(self.db.current_called(self.station, self.user["id"]))
         self.refresh()
+        n = self._update_handover_btn()
+        if n:
+            self.show_banner(f"📥 {n} consultation(s) en attente de reprise (bouton « Reprises »).", ms=8000)
 
     def before_logout(self):
-        """Relève de garde : le patient en cours est remis en file d'attente ou la consultation doit d'abord être clôturée."""
+        """Relève de garde : le patient en cours est réservé pour un confrère (brouillon conservé), remis en file, ou on reste connecté."""
         if not self.current:
             return True
-        box = QMessageBox(QMessageBox.Icon.Question, "Consultation en cours",
-                          f"Le patient {self.current['ticket_label']} est en consultation.\nQue faire avant de vous déconnecter ?", parent=self)
-        back = box.addButton("Remettre en file d'attente", QMessageBox.ButtonRole.AcceptRole)
+        self.autosave()
+        box = QMessageBox(QMessageBox.Icon.Question, "Relève de garde",
+                          f"Le patient {self.current['ticket_label']} est en consultation.\nQue faire avant de changer de compte ?", parent=self)
+        hand = box.addButton("🔁 Relève : réserver pour un confrère", QMessageBox.ButtonRole.AcceptRole)
+        back = box.addButton("Remettre en file d'attente", QMessageBox.ButtonRole.DestructiveRole)
         box.addButton("Rester connecté", QMessageBox.ButtonRole.RejectRole)
         box.exec()
-        if box.clickedButton() is back:
-            try:
-                self.db.release_patient(self.current["id"], self.user["id"])
-            except (ConnectionError, PermissionError) as e:
-                self.show_banner(str(e), "error"); return False
-            return True
+        try:
+            if box.clickedButton() is hand:
+                note, ok = QInputDialog.getText(self, "Relève de garde", "Consigne pour le confrère (facultatif) :")
+                if not ok:
+                    return False
+                self.db.handover_start(self.current["id"], note, self.user["id"]); self.log("relève de garde", self.current["ticket_label"])
+                return True
+            if box.clickedButton() is back:
+                self.db.release_patient(self.current["id"], self.user["id"]); self.log("patient remis en file", self.current["ticket_label"])
+                return True
+        except (ConnectionError, PermissionError, ValueError) as e:
+            self.show_banner(str(e), "error")
         return False
 
     @guard

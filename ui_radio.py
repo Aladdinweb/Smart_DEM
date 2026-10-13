@@ -122,7 +122,7 @@ class RadioWindow(BaseWindow):
         self.cur_info.setTextFormat(Qt.TextFormat.PlainText)
         self.note = QLineEdit(); self.note.setPlaceholderText("Remarque pour le médecin (facultatif)")
         nxt = QPushButton("📣  Appeler le patient suivant   (Espace)"); nxt.setObjectName("primary"); nxt.clicked.connect(self.call_next)
-        rec = QPushButton("🔁 Rappeler"); rec.clicked.connect(self.recall)
+        rec = QPushButton("📢 Rappeler / répéter l'appel"); rec.clicked.connect(self.recall)
         snd = QPushButton("📎 Envoyer le cliché / compte rendu au médecin"); snd.clicked.connect(self.send_result)
         prt = QPushButton("🖨 Imprimer le cliché / compte rendu (patient)"); prt.clicked.connect(self.print_result)
         ok = QPushButton("✅ Examen terminé"); ok.clicked.connect(lambda *_: self.validate("DONE"))
@@ -199,7 +199,7 @@ class RadioWindow(BaseWindow):
         row = self.db.radio_call_next(self.station, self.user["id"], self.room)   # l'écran concerné reçoit l'appel (service_id = RAD)
         if not row:
             return self.show_banner("Aucune demande en attente.")
-        self.hide_banner(); QApplication.beep(); self.refresh()
+        self.hide_banner(); self.log("appel", row["ticket_label"]); QApplication.beep(); self.refresh()
 
     @guard
     def recall(self, *_):
@@ -245,7 +245,7 @@ class RadioWindow(BaseWindow):
         if not self.current:
             return self.show_banner("Appelez d'abord un patient.", "error")
         r = self.db.radio_validate(self.current["id"], status, self.note.text().strip(), self.user["id"])
-        self.note.clear()
+        self.note.clear(); self.log("examen " + status.lower(), r["ticket_label"])
         self.show_banner("✅ Statut envoyé au médecin traitant." if r["source"] == "MEDECIN" else "✅ Examen enregistré.")
         self.refresh()
 

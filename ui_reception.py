@@ -14,6 +14,7 @@ from printer import print_ticket
 from styles import TRIAGE_COLORS, TRIAGE_ICON, TRIAGE_TEXT
 from ui_common import BaseWindow, guard
 from ui_dpi import PatientSearchDialog
+from ui_tv import TvControlDialog
 
 
 class EditDialog(QDialog):
@@ -53,28 +54,6 @@ class EditDialog(QDialog):
         return {"last_name": self.last.text(), "first_name": self.first.text(), "parsed": parse_age_or_birth(self.age.text()),
                 "gender": self.gender.currentData(), "service_code": self.service.currentData(), "triage": self.triage.currentData(),
                 "ident": self.ident.text().strip()}
-
-
-class TvControlDialog(QDialog):
-    """L'accueil pilote le flux d'affichage des écrans TV (annonce défilante, pause, effacement) sans toucher aux sessions des médecins."""
-    def __init__(self, db, user_id, parent=None):
-        super().__init__(parent)
-        self.db, self.uid = db, user_id
-        self.setWindowTitle("Écrans TV — flux d'affichage"); self.resize(520, 260)
-        v = QVBoxLayout(self)
-        st = db.tv_state()
-        v.addWidget(QLabel("Annonce défilante affichée en bas des écrans (facultatif) :"))
-        self.msg = QLineEdit(st["message"]); self.msg.setMaxLength(200); v.addWidget(self.msg)
-        self.pause = QCheckBox("⏸ Mettre l'affichage des appels en pause (les écrans montrent l'annonce)"); self.pause.setChecked(st["paused"]); v.addWidget(self.pause)
-        b = QPushButton("✅ Appliquer"); b.setObjectName("primary"); b.clicked.connect(self.apply); v.addWidget(b)
-        c = QPushButton("🧹 Effacer l'historique des appels affichés"); c.clicked.connect(lambda *_: self.db.tv_clear(self.uid)); v.addWidget(c)
-
-    def apply(self):
-        try:
-            self.db.tv_set(self.msg.text(), self.pause.isChecked(), self.uid)
-        except (ConnectionError, PermissionError) as e:
-            QMessageBox.warning(self, "Écrans TV", str(e)); return
-        self.accept()
 
 
 class ReceptionWindow(BaseWindow):
@@ -225,6 +204,7 @@ class ReceptionWindow(BaseWindow):
             archive_reception(row)                      # archivage automatique du dossier d'accueil
         except OSError as e:
             ok, msg = False, f"archivage impossible : {e}"
+        self.log("ticket", row["ticket_label"])
         self.reset_form(); self.refresh()
         if rev:
             self.show_revisit(rev)
@@ -332,6 +312,6 @@ class ReceptionWindow(BaseWindow):
         m = QMessageBox.question(self, "Nouvelle garde",
                                  "Remettre tous les compteurs à zéro (début de garde) ?\nL'historique est conservé.")
         if m == QMessageBox.StandardButton.Yes:
-            self.db.reset_shift(self.station, self.user["id"])
+            self.db.reset_shift(self.station, self.user["id"]); self.log("nouvelle garde")
             self.refresh()
             self.show_banner("Compteurs remis à zéro : nouvelle garde démarrée.")

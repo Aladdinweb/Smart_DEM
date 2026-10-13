@@ -175,9 +175,11 @@ class NetworkForm(QGroupBox):
             w.setVisible(show); self.f.labelForField(w).setVisible(show)
         self.tls.setVisible(m != "local"); self.fp.setVisible(m == "client" and self.tls.isChecked() and bool(self.pem))
         self.btn_trust.setVisible(m == "client" and self.tls.isChecked()); self.btn_fp.setVisible(m == "hub" and self.tls.isChecked())
+        import socket
         from config_manager import local_ip
         self.info.setText({"local": "", "client": "Saisissez l'adresse et le jeton affichés dans les paramètres du poste Hub.",
-                           "hub": f"Écran TV : http://{local_ip()}:{self.port.value()}/tv  (à ouvrir dans le navigateur de la TV).\n"
+                           "hub": f"Écran TV : http://{socket.gethostname()}:{self.port.value()}/tv  (ou http://{local_ip()}:{self.port.value()}/tv) — à ouvrir dans le navigateur de la TV ; "
+                                  "la TV affiche alors un code (TV-0000) à saisir à l'Accueil.\n"
                                   "Autorisez Smart DEM dans le pare-feu Windows si demandé. Le jeton ci-dessus est à saisir sur les postes clients."}[m])
         self.info.setVisible(bool(self.info.text()))
 

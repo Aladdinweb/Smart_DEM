@@ -1,6 +1,6 @@
 """Hub LAN : RPC sécurisé (jeton réseau + JWT par utilisateur, HTTPS/TLS 1.3 optionnel), WebSocket des écrans TV (/ws/tv),
 dispatching par service et par écran. Fonctionne SANS internet : aucune ressource externe."""
-import hmac, json, os, threading, time
+import hmac, json, os, random, secrets, threading, time
 
 from flask import Flask, Response, jsonify, request
 from flask_sock import Sock
@@ -31,6 +31,8 @@ class Hub:
         db.call_listeners.append(self.on_call)
         db.tv_listeners.append(self.on_tv)
         self.state = db.tv_state()
+        self.pending, self.announcements = {}, []          # codes d'appariement en attente, bandeaux d'annonce actifs
+        db.tv_pair_hook = self.bind_code
         CURRENT = self
 
     # --- diffusion vers les écrans TV : numéro + service + bureau UNIQUEMENT (secret médical : jamais de nom de patient) ---
@@ -48,11 +50,40 @@ class Hub:
     def on_tv(self, ev):
         """Pilotage depuis l'accueil : message défilant, pause, effacement, mise à jour de la configuration des écrans."""
         if ev["type"] == "state":
-            self.state = {"message": ev["message"], "paused": ev["paused"]}
+            self.state = {"message": ev["message"], "paused": ev["paused"], "voice": ev.get("voice", True)}
         elif ev["type"] == "clear":
             with self.lock:
                 self.recent.clear()
+        elif ev["type"] == "announce":
+            with self.lock:
+                self.announcements = [a for a in self._active_announcements() if a["id"] != ev["id"]] + [{**ev, "expires": time.time() + ev["seconds"]}]
+        elif ev["type"] == "announce_clear":
+            with self.lock:
+                self.announcements = [] if ev["id"] == "*" else [a for a in self.announcements if a["id"] != ev["id"]]
         self._broadcast(ev)
+
+    def _active_announcements(self):
+        return [a for a in self.announcements if a["expires"] > time.time()]
+
+    # --- appariement d'une TV par code court (TV-4092) ---
+    def new_code(self):
+        now = time.time()
+        self.pending = {c: v for c, v in self.pending.items() if now - v["ts"] < 600}
+        if len(self.pending) >= 30:
+            return None, None
+        code = next(c for c in (f"{random.randint(0, 9999):04d}" for _ in range(200)) if c not in self.pending)
+        token = secrets.token_hex(16)
+        self.pending[code] = {"token": token, "ts": now}
+        return code, token
+
+    def bind_code(self, code):
+        """Appelé par la base quand l'accueil saisit un code : retourne le jeton de la TV (et libère le code) ou None."""
+        c = "".join(ch for ch in str(code) if ch.isdigit())[-4:]
+        v = self.pending.get(c)
+        if v and time.time() - v["ts"] < 600:
+            self.pending[c]["bound"] = True
+            return v["token"]
+        return None
 
     @staticmethod
     def _wanted(services, ev):
@@ -121,18 +152,35 @@ class Hub:
                 result["token"] = make_token(self.db.jwt_secret(), u["id"], u["role"])
             return jsonify({"r": result})
 
+        @app.post("/api/tv/pair")
+        def tv_pair_new():                                    # public : la TV n'est qu'un navigateur ; le code n'ouvre aucun accès
+            code, token = self.new_code()
+            if not code:
+                return jsonify({"error": "trop de codes en attente"}), 429
+            return jsonify({"code": f"TV-{code}", "token": token})
+
+        @app.get("/api/tv/pair/<token>")
+        def tv_pair_status(token):
+            screen = self.db.tv_binding(token)
+            s = next((x for x in self.db.tv_screens() if x["id"] == screen), None) if screen else None
+            pending = any(v["token"] == token and time.time() - v["ts"] < 600 for v in self.pending.values())
+            return jsonify({"bound": bool(s), "screen": s["id"] if s else "", "name": s["name"] if s else "", "pending": pending})
+
         @app.get("/tv")
         def tv():
             return Response(TV_HTML, mimetype="text/html; charset=utf-8")
 
         @self.sock.route("/ws/tv")
         def ws_tv(ws):
-            screen = next((s for s in self.db.tv_screens() if s["id"] == request.args.get("screen")), None)
+            wanted = request.args.get("screen") or self.db.tv_binding(request.args.get("token", ""))
+            screen = next((s for s in self.db.tv_screens() if s["id"] == wanted), None)
             services = set(screen["services"]) if screen and screen["services"] else None
             with self.lock:
                 self.tv_clients[ws] = services
                 ws.send(json.dumps({"type": "snapshot", "recent": [] if self.state.get("paused") else self._recent_for(services),
-                                    "state": self.state, "screen": screen["name"] if screen else ""}, ensure_ascii=False))
+                                    "state": self.state, "screen": screen["name"] if screen else "",
+                                    "announcements": [{"id": a["id"], "text": a["text"], "level": a["level"], "seconds": int(a["expires"] - time.time())}
+                                                      for a in self._active_announcements()]}, ensure_ascii=False))
             try:
                 while True:
                     if ws.receive(timeout=25) is None:      # silence : battement de coeur

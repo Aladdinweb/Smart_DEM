@@ -200,7 +200,7 @@ class DpiAndTvTests(Base):
     def test_tv_control_and_drug_import(self):
         events = []; self.db.tv_listeners.append(events.append)
         self.db.tv_set("Laboratoire fermé à 15h", True, self.acc); self.db.tv_clear(self.acc)
-        self.assertEqual(self.db.tv_state(), {"message": "Laboratoire fermé à 15h", "paused": True})
+        self.assertEqual(self.db.tv_state(), {"message": "Laboratoire fermé à 15h", "paused": True, "voice": True})
         self.assertEqual([e["type"] for e in events], ["state", "clear"])
         self.assertEqual(self.db.import_drugs(["DOLIPRANE (Paracétamol) 500 mg cp", "doliprane (paracétamol) 500 mg cp", "", "NOUVEAU 10 mg"]), 2)
 
@@ -338,6 +338,144 @@ class ImageAndTlsTests(unittest.TestCase):
         srv.shutdown()
 
 
+class FunctionsAndLabTests(Base):
+    def test_official_functions_map_to_spaces(self):
+        import functions
+        self.assertEqual(len(functions.LABELS), 20)
+        for fn, role in (("AGENT DE BUREAU", "accueil"), ("PÉDIATRE", "medecin"), ("RESPONSABLE URGENCES", "medecin"), ("COORDINATEUR DES MÉDECINS", "coord_med"),
+                         ("ATS", "soins"), ("SAGE FEMME", "soins"), ("COORDINATEUR DE PARAMÉDICAL", "coord_para"), ("PRÉLÈVEMENT", "labo"),
+                         ("MANIPULATEUR", "radio"), ("PHARMACIEN", "pharmacie")):
+            uid = self.db.create_user("Nom", fn.title(), fn, "", "1234")
+            u = self.db.get_user(uid); self.assertEqual((u["role"], u["function"]), (role, fn))
+        with self.assertRaises(ValueError): self.db.create_user("N", "P", "CHEF SUPRÊME", "", "1234")           # liste fermée
+        ped = [u for u in self.db.list_users(roles=["medecin"]) if u["function"] == "PÉDIATRE"][0]
+        self.assertEqual(ped["services"], ["PED"])                                                          # services par défaut de la fonction
+        self.db.update_user(ped["id"], {"function": "INFERMIER"}); self.assertEqual(self.db.get_user(ped["id"])["role"], "soins")
+        self.assertEqual((functions.honorific("PÉDIATRE"), functions.honorific("OPTICIEN")), ("Dr ", ""))
+        self.assertEqual(functions.match_function("pediatre"), "PÉDIATRE")
+
+    def test_only_laborantin_validates_results_prelevement_does_not(self):
+        pre = self.db.create_user("Prel", "Eve", "PRÉLÈVEMENT", "", "1234")
+        a = self.add("Said", "Omar", "MG"); self.db.call_next(["MG"], "D", self.doc); cons = self.db.start_consultation(a["id"], self.doc, "D")
+        lab = self.db.create_lab_request(cons["id"], ["FNS"], "", False, self.doc)
+        self.assertEqual(self.db.lab_start(lab["id"], "L", pre)["status"], "IN_PROGRESS")                    # le prélèvement démarre
+        with self.assertRaises(PermissionError): self.db.add_result("lab", lab["id"], None, None, None, "Hb 13", pre)
+        with self.assertRaises(PermissionError): self.db.lab_validate(lab["id"], "", pre)
+        self.db.add_result("lab", lab["id"], None, None, None, "Hb 13", self.labo)                           # LABORANTIN (fonction par défaut)
+        self.assertEqual(self.db.lab_validate(lab["id"], "", self.labo)["status"], "DONE")
+
+
+class SoinsAndCoordinatorTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.ide = self.db.create_user("Soin", "Ida", "INFERMIER", "", "6666")
+        self.coord = self.db.create_user("Coord", "Med", "COORDINATEUR DES MÉDECINS", "", "7001")
+        self.cpara = self.db.create_user("Coord", "Para", "COORDINATEUR DE PARAMÉDICAL", "", "7002")
+
+    def test_soins_flow_ticket_vitals_orientation_to_doctor_queue(self):
+        a = self.add("Said", "Omar", "SOINS"); self.assertEqual(a["ticket_label"], "SOI-001")
+        row = self.db.call_next(["SOINS"], "PC-SOINS", self.ide, "Salle de soins"); self.assertEqual(row["id"], a["id"])
+        with self.assertRaises(ValueError): self.db.record_vitals(a["id"], {"temp": "58"}, self.ide)             # température impossible
+        with self.assertRaises(ValueError): self.db.record_vitals(a["id"], {"sys": "80", "dia": "120"}, self.ide)  # diastolique > systolique
+        with self.assertRaises(ValueError): self.db.record_vitals(a["id"], {}, self.ide)
+        v = self.db.record_vitals(a["id"], {"sys": "120", "dia": "80", "glyc": "1,1", "temp": "37,2", "note": "RAS"}, self.ide)
+        self.assertEqual((v["sys"], v["glyc"], v["temp"]), (120.0, 1.1, 37.2))
+        self.assertEqual(self.db.record_vitals(a["id"], {"sys": "12", "dia": "8", "tension_unit": "cmHg"}, self.ide)["tension_unit"], "cmHg")
+        raw = sqlite3.connect(self.db.path).execute("SELECT vitals_json FROM vitals").fetchone()[0]; self.assertTrue(raw.startswith("enc1:"))
+        with self.assertRaises(ValueError): self.db.orient_patient(a["id"], "URG", None, self.ide)                  # le niveau de tri est obligatoire pour les urgences
+        o = self.db.orient_patient(a["id"], "URG", "ORANGE", self.ide)
+        self.assertEqual((o["service_code"], o["triage_level"], o["status"], o["ticket_label"]), ("URG", "ORANGE", "WAITING", "SOI-001"))
+        self.assertEqual([r["id"] for r in self.db.queue(["URG"])], [a["id"]])                                # visible dans la file du médecin
+        self.assertEqual(len(self.db.vitals_for_admission(a["id"], self.doc)), 2)                              # constantes visibles du médecin
+        with self.assertRaises(PermissionError): self.db.vitals_for_admission(a["id"], self.acc)
+        with self.assertRaises(PermissionError): self.db.orient_patient(a["id"], "MG", None, self.doc)
+
+    def test_coordinators_global_views_and_reassign(self):
+        self.add("A", "B", "URG", triage="ROUGE"); self.add("C", "D", "PED"); self.add("E", "F", "SOINS"); self.db.call_next(["PED"], "PC", self.doc)
+        ov = self.db.coord_overview(self.coord); by = {s["code"]: s for s in ov["by_service"]}
+        self.assertEqual((ov["role"], set(ov["scope"]) >= {"URG", "PED", "MG", "DENT"}, "SOINS" in by), ("coord_med", True, False))
+        self.assertEqual((by["URG"]["waiting"], by["URG"]["red"], by["PED"]["called"]), (1, 1, 1))
+        self.assertEqual(ov["waiting"][0]["triage_level"], "ROUGE")                                             # urgence en tête
+        self.assertEqual(self.db.coord_overview(self.cpara)["scope"], ["SOINS"])
+        wid = ov["waiting"][0]["id"]
+        self.assertEqual(self.db.reassign_admission(wid, "MG", self.coord)["service_code"], "MG")
+        with self.assertRaises(PermissionError): self.db.coord_overview(self.doc)
+        with self.assertRaises(PermissionError): self.db.reassign_admission(wid, "PED", self.acc)
+        with self.assertRaises(PermissionError): self.db.call_next(["MG"], "PC", self.coord)                    # le coordinateur supervise, il n'appelle pas
+        with self.assertRaises(ValueError): self.db.reassign_admission(wid, "RAD", self.coord)
+
+
+class HandoverAndDraftTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.a = self.add("Said", "Omar", "MG", triage="ORANGE"); self.db.call_next(["MG"], "DOC1", self.doc)
+        self.cons = self.db.start_consultation(self.a["id"], self.doc, "DOC1")
+
+    def test_handover_keeps_drafts_and_transfers_ownership(self):
+        draft = {"items": [{"drug": "Paracétamol", "dosage": "1 cp x 3/j", "duration": "5 jours"}], "diag": "Angine", "notes": "à revoir"}
+        self.db.save_draft(self.a["id"], "consult", draft, self.doc)
+        raw = sqlite3.connect(self.db.path).execute("SELECT data_json FROM drafts").fetchone()[0]; self.assertTrue(raw.startswith("enc1:") and "Angine" not in raw)
+        self.db.save_draft(self.a["id"], "consult", {**draft, "notes": "v2"}, self.doc)                         # sauvegarde instantanée = mise à jour
+        self.assertEqual(self.db.get_draft(self.a["id"], "consult", self.doc)["notes"], "v2")
+        self.db.handover_start(self.a["id"], "Penser à l'ECG", self.doc)
+        self.assertEqual(self.db.queue(["MG"]), [])                                                             # le patient n'est PAS remis dans la file
+        self.assertIsNone(self.db.current_called("DOC1", self.doc))
+        h = self.db.handover_list(["MG"], self.doc2); self.assertEqual((len(h), h[0]["handover_note"], h[0]["from_last"]), (1, "Penser à l'ECG", "MARTIN"))
+        with self.assertRaises(PermissionError): self.db.handover_list(["MG"], self.acc)
+        soins = self.db.create_user("S", "I", "INFERMIER", "", "6666")
+        self.assertEqual(self.db.handover_list(["MG"], soins), [])                                              # un soignant ne voit pas la relève d'un médecin
+        with self.assertRaises(PermissionError): self.db.take_over(self.a["id"], soins)
+        t = self.db.take_over(self.a["id"], self.doc2)
+        self.assertEqual((t["called_user_id"], t["handover_at"]), (self.doc2, None))
+        self.assertEqual(self.db.current_called("DOC1", self.doc2)["id"], self.a["id"])
+        self.assertEqual(self.db.start_consultation(self.a["id"], self.doc2, "DOC1")["id"], self.cons["id"])    # même consultation, nouveau titulaire
+        self.assertEqual(self.db.get_draft(self.a["id"], "consult", self.doc2)["diag"], "Angine")               # brouillon retrouvé
+        self.assertIsNone(self.db.get_draft(self.a["id"], "consult", self.doc))
+        with self.assertRaises(ValueError): self.db.take_over(self.a["id"], self.doc2)                           # déjà repris
+        self.db.close_consultation(self.cons["id"], "", "Angine", self.doc2)
+        self.assertIsNone(self.db.get_draft(self.a["id"], "consult", self.doc2))                                 # brouillon supprimé à la clôture
+
+    def test_release_clears_handover_and_only_owner_can_start(self):
+        with self.assertRaises(ValueError): self.db.handover_start(self.a["id"], "", self.doc2)                 # pas son patient
+        self.db.handover_start(self.a["id"], "x", self.doc)
+        self.db.release_patient(self.a["id"], self.doc)                                                         # sans effet : plus titulaire
+        self.assertEqual(len(self.db.handover_list(["MG"], self.doc2)), 1)
+
+
+class FunctionsUserFolderTests(unittest.TestCase):
+    def test_user_folder_profile_log_and_drafts(self):
+        tmp = tempfile.mkdtemp(); os.environ.update({"LOCALAPPDATA": tmp, "HOME": tmp})
+        import userdata
+        u = {"id": 12, "last_name": "BENALI", "first_name": "Karim-Éric", "function": "MÉDECIN", "role": "medecin", "specialty": "", "services": ["MG"]}
+        self.assertEqual(userdata.slug(u), "BENALI_KARIM_ERIC_00012")
+        p = userdata.write_profile(u, "PC1"); self.assertTrue(p.replace("\\", "/").endswith("data/users/BENALI_KARIM_ERIC_00012/profile.json"))
+        self.assertEqual(json.load(open(p, encoding="utf-8"))["fonction"], "MÉDECIN")
+        userdata.log_activity(u, "connexion", "", "PC1"); userdata.log_activity(u, "ordonnance", "n° 2026000007", "PC1")
+        lines = open(os.path.join(userdata.user_dir(u), "activity.log"), encoding="utf-8").read().splitlines()
+        self.assertEqual((len(lines), lines[1].split(" | ")[2:]), (2, ["ordonnance", "n° 2026000007"]))
+        d = userdata.save_draft(u, "consult_5", {"x": 1}); self.assertTrue(os.path.exists(d)); userdata.delete_draft(u, "consult_5"); self.assertFalse(os.path.exists(d))
+
+
+class V3ToV4MigrationTests(unittest.TestCase):
+    def test_ats_account_moves_to_soins_and_users_survive(self):
+        d = tempfile.mkdtemp(); path = os.path.join(d, "dem_database.db")
+        con = _sqlite_v(path, "schema_v3.sql")
+        con.execute("INSERT INTO shifts(started_at) VALUES ('2026-10-01 08:00:00')")
+        for last, role, spec in (("FERAK", "accueil", "ATS"), ("DUPONT", "medecin", "Pédiatre"), ("RADI", "radio", ""), ("ACC", "accueil", "")):
+            con.execute("INSERT INTO users(last_name,first_name,role,specialty,pin_salt,pin_hash,created_at) VALUES (?,?,?,?,'aa','bb','2026-10-01 07:00:00')", (last, "X", role, spec))
+        con.execute("""INSERT INTO admissions(shift_id,service_code,ticket_number,ticket_label,full_name,name_norm,birth_year,gender,created_at,last_name,first_name)
+                       VALUES (1,'MG',1,'MG-001','A B','a b',1980,'H','2026-10-01 08:00:00','A','B')""")
+        con.execute("INSERT INTO consultations(admission_id,doctor_user_id,started_at) VALUES (1,2,'2026-10-01 08:10:00')")
+        con.commit(); con.close()
+        db = Database(path)
+        self.assertEqual(db._one("SELECT value FROM meta WHERE key='schema_version'")["value"], "4")
+        got = {u["last_name"]: (u["role"], u["function"]) for u in db.list_users(active_only=False)}
+        self.assertEqual(got, {"FERAK": ("soins", "ATS"), "DUPONT": ("medecin", "PÉDIATRE"), "RADI": ("radio", "MANIPULATEUR"), "ACC": ("accueil", "AGENT DE BUREAU")})
+        self.assertEqual(db._one("SELECT doctor_user_id FROM consultations WHERE id=1")["doctor_user_id"], 2)    # lien conservé
+        self.assertIsNone(db._one("PRAGMA foreign_key_check"))
+        db.create_user("Coord", "Z", "COORDINATEUR DES MÉDECINS", "", "1234")                                    # nouveaux rôles acceptés
+
+
 def _sqlite_v(path, fixture):
     con = sqlite3.connect(path)
     with open(os.path.join(FIX, fixture), encoding="utf-8") as f:
@@ -346,7 +484,7 @@ def _sqlite_v(path, fixture):
 
 
 class MigrationTests(unittest.TestCase):
-    def test_v1_database_is_migrated_to_v3(self):
+    def test_v1_database_is_migrated_to_latest(self):
         d = tempfile.mkdtemp(); path = os.path.join(d, "dem_database.db")
         con = _sqlite_v(path, "schema_v1.sql")
         con.execute("INSERT INTO shifts(started_at) VALUES ('2026-10-01 08:00:00')")
@@ -355,7 +493,7 @@ class MigrationTests(unittest.TestCase):
                        VALUES (1,'LAB',1,'LAB-001','Benali Ahmed','ahmed benali',1990,'H','2026-10-01 08:05:00')""")
         con.commit(); con.close()
         db = Database(path)
-        self.assertEqual(db._one("SELECT value FROM meta WHERE key='schema_version'")["value"], "3")
+        self.assertEqual(db._one("SELECT value FROM meta WHERE key='schema_version'")["value"], "4")
         a = db.get(1); self.assertEqual((a["ticket_label"], a["last_name"], a["first_name"], a["patient_ident"]), ("LAB-001", "Benali Ahmed", "", None))
         self.assertTrue(os.path.isdir(os.path.join(d, "backups")))
         uid = db.create_user("L", "N", "labo", "", "1234"); self.assertTrue(db.verify_pin(uid, "1234")["ok"])   # rôle « labo » accepté
@@ -445,9 +583,37 @@ class HubTests(unittest.TestCase):
         self.assertEqual(len(allscr.msgs), 2); self.assertTrue(all("name" not in m and "full_name" not in m for m in allscr.msgs))
         self.assertEqual(dent.msgs[0]["service_id"], "DENT"); self.assertTrue(dent.msgs[0]["color"].startswith("#"))
         self.db.tv_set("Laboratoire fermé à 15h", True, self.acc)
-        self.assertEqual(allscr.msgs[-1], {"type": "state", "message": "Laboratoire fermé à 15h", "paused": True})
+        self.assertEqual(allscr.msgs[-1], {"type": "state", "message": "Laboratoire fermé à 15h", "paused": True, "voice": True})
         n = len(allscr.msgs); self.hub.test_call(); self.assertEqual(len(allscr.msgs), n)               # en pause : rien n'est affiché
         self.assertIn("ws/tv", self.c.get("/tv").get_data(as_text=True))
+
+    def test_voice_announcements_and_pairing(self):
+        class Fake:
+            def __init__(self): self.msgs = []
+            def send(self, m): self.msgs.append(json.loads(m))
+        tv = Fake(); self.hub.tv_clients[tv] = None
+        self.db.tv_voice(False, self.acc); self.assertEqual(tv.msgs[-1], {"type": "state", "message": "", "paused": False, "voice": False})
+        urgent = self.db.create_user("Urg", "Resp", "RESPONSABLE URGENCES", "", "1234")
+        simple = self.db.create_user("Med", "Simple", "MÉDECIN", "", "1235")
+        aid = self.db.tv_announce("Arrivée de blessés — renforts aux urgences", "URGENCE", 120, urgent)
+        self.assertEqual((tv.msgs[-1]["level"], tv.msgs[-1]["id"]), ("URGENCE", aid)); self.assertEqual(len(self.hub._active_announcements()), 1)
+        with self.assertRaises(PermissionError): self.db.tv_announce("x", "INFO", 10, simple)
+        with self.assertRaises(PermissionError): self.db.tv_announce("x", "INFO", 10, self.db.create_user("R", "D", "MANIPULATEUR", "", "1236"))
+        with self.assertRaises(ValueError): self.db.tv_announce("x", "PANIQUE", 10, self.acc)
+        self.db.tv_announce_clear(aid, self.acc); self.assertEqual(self.hub._active_announcements(), [])
+        # appariement : la TV demande un code, l'accueil le saisit et choisit l'écran
+        self.db.tv_set_screens([{"id": "couloir1", "name": "Couloir 1", "services": ["DENT", "RAD"]}])
+        r = self.c.post("/api/tv/pair").get_json(); self.assertRegex(r["code"], r"^TV-\d{4}$")
+        self.assertFalse(self.c.get("/api/tv/pair/" + r["token"]).get_json()["bound"]); self.assertTrue(self.c.get("/api/tv/pair/" + r["token"]).get_json()["pending"])
+        with self.assertRaises(ValueError): self.db.tv_pair(r["code"], "inconnu", self.acc)
+        with self.assertRaises(PermissionError): self.db.tv_pair(r["code"], "couloir1", self.doc)
+        self.assertTrue(self.db.tv_pair(r["code"].lower(), "couloir1", self.acc))
+        st = self.c.get("/api/tv/pair/" + r["token"]).get_json(); self.assertEqual((st["bound"], st["screen"], st["name"]), (True, "couloir1", "Couloir 1"))
+        self.assertEqual([p["screen"] for p in self.db.tv_pairs()], ["couloir1"])
+        self.db.tv_unpair(r["token"], self.acc); self.assertFalse(self.c.get("/api/tv/pair/" + r["token"]).get_json()["bound"])
+        for _ in range(5):
+            with self.assertRaises(ValueError): self.db.tv_pair("TV-0000" if "0000" not in self.hub.pending else "TV-9999", "couloir1", self.acc)
+        with self.assertRaisesRegex(ValueError, "Trop de tentatives"): self.db.tv_pair("TV-0001", "couloir1", self.acc)
 
     def test_https_required_when_tls_enabled(self):
         self.hub.tls_required = True

@@ -9,6 +9,7 @@ import templates
 from barcode import barcode_image
 from branding import establishment, logo_path
 from database import FMT, age_from_row, display_name
+from functions import honorific
 from qr import qr_image
 
 
@@ -29,7 +30,7 @@ def header_html(cfg, kind=None):
 
 
 def _doctor_name(doc):
-    return f"Dr {doc['last_name']} {doc['first_name']}" + (f" — {doc['specialty']}" if doc.get("specialty") else "") if doc else ""
+    return f"{honorific(doc.get('function'))}{doc['last_name']} {doc['first_name']}" + (f" — {doc['specialty']}" if doc.get("specialty") else "") if doc else ""
 
 
 def _patient_line(adm):

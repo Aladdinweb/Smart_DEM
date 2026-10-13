@@ -4,22 +4,24 @@ from datetime import datetime
 
 from PyQt6.QtCore import QProcess, QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
+from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
                              QPushButton, QVBoxLayout, QWidget)
 
 from branding import HeaderBar
 from config_manager import data_dir
 from data_structures import SERVICE_BY_CODE
+import userdata
 from database import FMT
+from functions import honorific
 
 ROLE_LABELS = {"accueil": "Accueil Général", "dedie": "Accueil dédié"}
-USER_ROLE_LABELS = {"accueil": "Accueil", "medecin": "Médecin", "radio": "Manipulateur radio", "pharmacie": "Pharmacien", "labo": "Laboratoire"}
+USER_ROLE_LABELS = {"accueil": "Accueil", "medecin": "Consultation", "radio": "Radiologie", "pharmacie": "Pharmacie", "labo": "Laboratoire",
+                    "soins": "Soins & Triage", "coord_med": "Coordination des médecins", "coord_para": "Coordination paramédicale"}
 BANNER_MS = {"info": 4000, "error": 6000, "revisit": 10000}      # les bannières se masquent seules (3 à 10 s)
 
 
 def user_label(u):
-    name = f"{u['last_name']} {u['first_name']}"
-    return ("Dr " + name) if u["role"] == "medecin" else name
+    return f"{honorific(u.get('function'))}{u['last_name']} {u['first_name']}"
 
 
 def guard(fn):
@@ -117,7 +119,17 @@ class BaseWindow(QMainWindow):
     def set_user(self, user):
         self.user = user
         extra = f" — {user['specialty']}" if user.get("specialty") else ""
-        self.user_chip.setText(f"👤 {user_label(user)}  •  {USER_ROLE_LABELS.get(user['role'], '')}{extra}")
+        self.user_chip.setText(f"👤 {user_label(user)}  •  {user.get('function') or USER_ROLE_LABELS.get(user['role'], '')}{extra}")
+        try:
+            userdata.write_profile(user, self.station)            # dossier local data/users/[SLUG]/ : profil + journal d'activité
+            self.log("connexion")
+        except OSError:
+            pass
+
+    def log(self, action, detail=""):
+        """Journal d'activité de l'agent sur ce poste (data/users/[SLUG]/activity.log) — jamais d'identité de patient."""
+        if self.user:
+            userdata.log_activity(self.user, action, detail, self.station)
 
     def before_logout(self):
         """À surcharger : retourne False pour annuler la déconnexion (ex. consultation en cours)."""
@@ -125,6 +137,7 @@ class BaseWindow(QMainWindow):
 
     def logout(self, *_):
         if self.before_logout() and self.logout_cb:
+            self.log("déconnexion")
             self.logout_cb()
 
     def on_login(self):
@@ -209,6 +222,38 @@ class BaseWindow(QMainWindow):
             return
         from ui_settings import SettingsDialog
         SettingsDialog(self.cfg, self.db, self).exec()
+
+
+class HandoverDialog(QDialog):
+    """Patients réservés par un confrère lors d'une relève de garde : reprise en un clic (consultation et brouillon repris)."""
+    def __init__(self, db, user, services, parent=None):
+        super().__init__(parent)
+        self.db, self.user, self.taken = db, user, None
+        self.setWindowTitle("Relève de garde — reprises en attente"); self.resize(720, 360)
+        v = QVBoxLayout(self)
+        from PyQt6.QtWidgets import QAbstractItemView, QTableWidget, QTableWidgetItem
+        self.rows = db.handover_list(services, user["id"])
+        self.t = QTableWidget(len(self.rows), 5)
+        self.t.setHorizontalHeaderLabels(["Ticket", "Patient", "De la part de", "Depuis", "Consigne"])
+        self.t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.t.verticalHeader().hide(); self.t.horizontalHeader().setStretchLastSection(True)
+        from database import display_name
+        for i, r in enumerate(self.rows):
+            for j, txt in enumerate((r["ticket_label"], display_name(r), f"{honorific(r.get('from_function'))}{r['from_last']} {r['from_first']}", (r["handover_at"] or "")[11:16], r["handover_note"] or "")):
+                self.t.setItem(i, j, QTableWidgetItem(txt))
+        v.addWidget(self.t)
+        b = QPushButton("📥 Reprendre ce patient"); b.setObjectName("primary"); b.clicked.connect(self.take); v.addWidget(b)
+
+    def take(self, *_):
+        r = self.t.currentRow()
+        if not 0 <= r < len(self.rows):
+            return QMessageBox.information(self, "Reprise", "Sélectionnez un patient.")
+        try:
+            self.taken = self.db.take_over(self.rows[r]["id"], self.user["id"])
+        except (ConnectionError, PermissionError, ValueError) as e:
+            return QMessageBox.warning(self, "Reprise", str(e))
+        self.accept()
 
 
 def Qt_PlainText():

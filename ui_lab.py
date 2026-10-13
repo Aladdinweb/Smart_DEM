@@ -79,7 +79,7 @@ class LabWindow(BaseWindow):
         self.cur = QLabel("Aucun patient appelé"); self.cur.setStyleSheet("font-size:20px;font-weight:700;"); self.cur.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.cur.setTextFormat(Qt.TextFormat.PlainText)
         row = QHBoxLayout()
-        for label, fn in (("📣 Appeler le suivant (Espace)", self.call_next), ("🔁 Rappeler", self.recall), ("✔ Terminé", self.finish)):
+        for label, fn in (("📣 Appeler le suivant (Espace)", self.call_next), ("📢 Rappeler / répéter l'appel", self.recall), ("✔ Terminé", self.finish)):
             b = QPushButton(label); b.clicked.connect(fn); row.addWidget(b)
         for x in (t, self.q_calls, self.cur):
             av.addWidget(x)
@@ -213,7 +213,7 @@ class LabWindow(BaseWindow):
             pass
         for x in (self.t_last, self.t_first, self.t_age, self.t_ident):
             x.clear()
-        self.t_last.setFocus(); self.refresh()
+        self.log("ticket", row["ticket_label"]); self.t_last.setFocus(); self.refresh()
         self.show_banner(f"Ticket {row['ticket_label']} émis." + ("" if ok else f" (impression : {msg})"), "info" if ok else "error")
         return row
 

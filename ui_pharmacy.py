@@ -12,6 +12,10 @@ class PharmacyWindow(BaseWindow):
     def __init__(self, cfg, db):
         super().__init__(cfg, db)
         self.cur_rx, self._queue = None, []
+        mode = QLabel("🏥 Mode réseau local (LAN) : ordonnances reçues de l'établissement. Synchronisation cloud externe : indisponible.")
+        mode.setStyleSheet("color:#8b97a7;"); mode.setWordWrap(True); self.content.addWidget(mode)
+        ext = QPushButton("☁ Synchroniser avec l'extérieur (officines, serveur national)"); ext.clicked.connect(self.external_sync)
+        self.header_extra.addWidget(ext)
         body = QHBoxLayout(); self.content.addLayout(body, 1)
 
         left = QFrame(); left.setObjectName("card"); lv = QVBoxLayout(left)
@@ -40,6 +44,10 @@ class PharmacyWindow(BaseWindow):
             rv.addWidget(x)
         body.addWidget(right, 3)
         self.t = QTimer(self); self.t.timeout.connect(self.refresh); self.t.start(3000)
+
+    def external_sync(self, *_):
+        QMessageBox.information(self, "Synchronisation externe", "INDISPONIBLE ACTUELLEMENT\n\nAucun serveur externe n'est disponible : seules les "
+                                "ordonnances du réseau local sont traitées.")
 
     def on_login(self):
         self.scan.setFocus(); self.refresh()
@@ -96,6 +104,7 @@ class PharmacyWindow(BaseWindow):
             return
         r = self.db.pharmacy_dispense(self.cur_rx["uuid"], self.user["id"])
         if r["ok"]:
+            self.log("délivrance", self.cur_rx["number"])
             self.show_banner("✅ Ordonnance marquée comme délivrée.")
             self.btn.setEnabled(False); self.refresh()
         else:

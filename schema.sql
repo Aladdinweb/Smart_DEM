@@ -1,18 +1,19 @@
--- Smart DEM — schéma SQLite v3 (dem_database.db)
+-- Smart DEM — schéma SQLite v4 (dem_database.db)
 -- Installation neuve : ce fichier crée tout. Base existante (v1/v2) : les tables manquantes sont créées ici, les colonnes
 -- ajoutées plus tard sont ajoutées par database.MIGRATIONS (migrations idempotentes). Ne jamais indexer ici une colonne
 -- ajoutée par migration : la base antérieure ne l'a pas encore à ce moment.
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '3');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4');
 
 -- ===== Utilisateurs (connexion par PIN à 4 chiffres) =====
 CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     last_name     TEXT NOT NULL,
     first_name    TEXT NOT NULL,
-    role          TEXT NOT NULL CHECK (role IN ('accueil','medecin','radio','pharmacie','labo')),
+    role          TEXT NOT NULL CHECK (role IN ('accueil','medecin','radio','pharmacie','labo','soins','coord_med','coord_para')),
+    function      TEXT,                       -- v4 : fonction officielle (liste fermée, voir functions.py)
     specialty     TEXT,
     pin_salt      TEXT NOT NULL,
     pin_hash      TEXT NOT NULL,
@@ -66,6 +67,9 @@ CREATE TABLE IF NOT EXISTS admissions (
     created_by     INTEGER,                       -- v2 : utilisateur ayant enregistré
     patient_ident  TEXT,                          -- v3 : N° d'identification (carte d'identité, dossier…) facultatif
     called_user_id INTEGER,                       -- v3 : médecin / agent qui a appelé (isolation multi-comptes)
+    handover_note  TEXT,                          -- v4 : relève de garde (patient réservé pour un confrère)
+    handover_from  INTEGER,
+    handover_at    TEXT,
     UNIQUE (shift_id, ticket_label)
 );
 CREATE INDEX IF NOT EXISTS idx_adm_shift   ON admissions(shift_id, created_at);
@@ -223,6 +227,27 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
     next_try   TEXT,
     created_at TEXT NOT NULL,
     sent_at    TEXT
+);
+
+-- ===== Constantes vitales (poste Soins & Triage) =====
+CREATE TABLE IF NOT EXISTS vitals (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    admission_id INTEGER NOT NULL REFERENCES admissions(id),
+    user_id      INTEGER REFERENCES users(id),
+    recorded_at  TEXT NOT NULL,
+    vitals_json  TEXT NOT NULL                    -- {sys,dia,tension_unit,glyc,glyc_unit,temp,note} (chiffré)
+);
+CREATE INDEX IF NOT EXISTS idx_vitals_adm ON vitals(admission_id);
+
+-- ===== Brouillons (consultation / soins) : sauvegarde instantanée, relève de garde =====
+CREATE TABLE IF NOT EXISTS drafts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    admission_id INTEGER NOT NULL REFERENCES admissions(id),
+    user_id      INTEGER NOT NULL REFERENCES users(id),
+    kind         TEXT NOT NULL,
+    data_json    TEXT NOT NULL,                   -- chiffré
+    updated_at   TEXT NOT NULL,
+    UNIQUE (admission_id, user_id, kind)
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (

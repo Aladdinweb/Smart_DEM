@@ -11,7 +11,7 @@ from branding import HeaderBar
 from data_structures import CONSULT_SERVICES, SERVICE_BY_CODE
 from ui_common import USER_ROLE_LABELS, user_label
 
-ROLE_CHOICES = [("Accueil", "accueil"), ("Médecin / spécialiste", "medecin"), ("Manipulateur radio", "radio"), ("Pharmacien", "pharmacie"), ("Laboratoire (secrétariat / technicien)", "labo")]
+from functions import FUNCTIONS, LABELS, ROLE_OF, DEFAULT_SERVICES, SPACE_LABELS  # noqa: E402
 
 
 def admin_ok(cfg, parent, title="Code administrateur"):
@@ -68,7 +68,7 @@ class LoginDialog(QDialog):
         except ConnectionError as e:
             self.msg.setText(str(e)); return
         for u in users:
-            it = QListWidgetItem(f"{user_label(u)}   —   {USER_ROLE_LABELS.get(u['role'], '')}" + (f" ({u['specialty']})" if u["specialty"] else ""))
+            it = QListWidgetItem(f"{user_label(u)}   —   {u['function']}" + (f" ({u['specialty']})" if u["specialty"] else ""))
             it.setData(Qt.ItemDataRole.UserRole, u["id"])
             self.users.addItem(it)
         if self.users.count() == 1:
@@ -125,17 +125,23 @@ class LoginDialog(QDialog):
 
 
 class UserForm(QDialog):
+    """Création / modification : la FONCTION se choisit obligatoirement dans la liste officielle ; elle détermine l'espace de travail."""
     def __init__(self, user=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Utilisateur")
         f = QFormLayout(self)
         self.last = QLineEdit(user["last_name"] if user else ""); self.first = QLineEdit(user["first_name"] if user else "")
-        self.role = QComboBox()
-        for label, code in ROLE_CHOICES:
-            self.role.addItem(label, code)
+        self.func = QComboBox()
+        last_group = None
+        for label, role, group, _svc in FUNCTIONS:
+            if group != last_group:
+                self.func.addItem(f"— {group} —"); self.func.model().item(self.func.count() - 1).setEnabled(False); last_group = group
+            self.func.addItem("   " + label, label)
+        self.space = QLabel(""); self.space.setStyleSheet("color:#8b97a7;")
         self.spec = QLineEdit(user.get("specialty", "") if user else "")
-        self.spec.setPlaceholderText("ex : Médecin généraliste, Pédiatre…")
-        f.addRow("Nom :", self.last); f.addRow("Prénom :", self.first); f.addRow("Rôle :", self.role); f.addRow("Spécialité :", self.spec)
+        self.spec.setPlaceholderText("Précision facultative (ex : diabétologue, chirurgien-dentiste…)")
+        f.addRow("Nom :", self.last); f.addRow("Prénom :", self.first); f.addRow("Fonction :", self.func); f.addRow("Espace ouvert :", self.space)
+        f.addRow("Précision :", self.spec)
         self.svc_checks = {}
         self.svc_box = QWidget()
         g = _G(self.svc_box); g.setContentsMargins(0, 0, 0, 0)
@@ -143,27 +149,42 @@ class UserForm(QDialog):
             cb = QCheckBox(f"{SERVICE_BY_CODE[code]['icon']} {SERVICE_BY_CODE[code]['name']}".replace("&", "&&"))
             cb.setChecked(code in (user.get("services", []) if user else [])); self.svc_checks[code] = cb; g.addWidget(cb, i // 2, i % 2)
         f.addRow("Services pris en charge (file d'attente visible) :", self.svc_box)
-        self.role.currentIndexChanged.connect(lambda *_: self.svc_box.setVisible(self.role.currentData() == "medecin"))
         self.pin1 = self.pin2 = None
         if user:
-            self.role.setCurrentIndex(max(0, self.role.findData(user["role"])))
+            self.func.setCurrentIndex(max(1, self.func.findData(user.get("function"))))
         else:
+            self.func.setCurrentIndex(self.func.findData("AGENT DE BUREAU"))
             self.pin1 = QLineEdit(); self.pin1.setEchoMode(QLineEdit.EchoMode.Password); self.pin1.setMaxLength(4)
             self.pin2 = QLineEdit(); self.pin2.setEchoMode(QLineEdit.EchoMode.Password); self.pin2.setMaxLength(4)
             f.addRow("PIN (4 chiffres) :", self.pin1); f.addRow("Confirmer :", self.pin2)
+        self.func.currentIndexChanged.connect(self._sync)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self._ok); bb.rejected.connect(self.reject); f.addRow(bb)
-        self.svc_box.setVisible(self.role.currentData() == "medecin")
+        self._sync(first=True)
+
+    def function(self):
+        return self.func.currentData()
+
+    def _sync(self, *_, first=False):
+        fn = self.function()
+        role = ROLE_OF.get(fn, "")
+        self.space.setText(SPACE_LABELS.get(role, ""))
+        self.svc_box.setVisible(role == "medecin")
+        if role == "medecin" and not first:                    # services par défaut de la fonction (modifiables)
+            for c, cb in self.svc_checks.items():
+                cb.setChecked(c in DEFAULT_SERVICES.get(fn, []))
 
     def services(self):
-        return [c for c, cb in self.svc_checks.items() if cb.isChecked()] if self.role.currentData() == "medecin" else []
+        return [c for c, cb in self.svc_checks.items() if cb.isChecked()] if ROLE_OF.get(self.function()) == "medecin" else []
 
     def _ok(self):
         err = None
-        if not self.last.text().strip() or not self.first.text().strip():
+        if not self.function():
+            err = "Choisissez une fonction dans la liste officielle."
+        elif not self.last.text().strip() or not self.first.text().strip():
             err = "Nom et prénom obligatoires."
-        elif self.role.currentData() == "medecin" and not self.services():
-            err = "Cochez au moins un service pour un médecin / spécialiste (sa file d'attente)."
+        elif ROLE_OF.get(self.function()) == "medecin" and not self.services():
+            err = "Cochez au moins un service : c'est la file d'attente que ce praticien verra."
         elif self.pin1 is not None and (not self.pin1.text().isdigit() or len(self.pin1.text()) != 4 or self.pin1.text() != self.pin2.text()):
             err = "Le PIN doit contenir exactement 4 chiffres, confirmés à l'identique."
         if err:
@@ -180,7 +201,7 @@ class UsersDialog(QDialog):
         self.setWindowTitle("Utilisateurs"); self.resize(720, 520)
         lay = QVBoxLayout(self)
         self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Nom", "Prénom", "Rôle", "Spécialité", "Services", "Actif"])
+        self.table.setHorizontalHeaderLabels(["Nom", "Prénom", "Fonction", "Précision", "Services", "Actif"])
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -197,7 +218,7 @@ class UsersDialog(QDialog):
         self.users = self.db.list_users(None, False)
         self.table.setRowCount(len(self.users))
         for i, u in enumerate(self.users):
-            for j, v in enumerate((u["last_name"], u["first_name"], USER_ROLE_LABELS.get(u["role"], u["role"]),
+            for j, v in enumerate((u["last_name"], u["first_name"], u["function"],
                                    u["specialty"], ", ".join(u["services"]), "oui" if u["active"] else "non")):
                 self.table.setItem(i, j, QTableWidgetItem(v))
 
@@ -209,7 +230,7 @@ class UsersDialog(QDialog):
         d = UserForm(None, self)
         if d.exec():
             try:
-                self.db.create_user(d.last.text(), d.first.text(), d.role.currentData(), d.spec.text(), d.pin1.text(), d.services())
+                self.db.create_user(d.last.text(), d.first.text(), d.function(), d.spec.text(), d.pin1.text(), d.services())
             except Exception as e:
                 QMessageBox.warning(self, "Utilisateur", str(e))
             self.refresh()
@@ -220,7 +241,7 @@ class UsersDialog(QDialog):
             d = UserForm(u, self)
             if d.exec():
                 self.db.update_user(u["id"], {"last_name": d.last.text(), "first_name": d.first.text(),
-                                              "role": d.role.currentData(), "specialty": d.spec.text(), "services": d.services()})
+                                              "function": d.function(), "specialty": d.spec.text(), "services": d.services()})
                 self.refresh()
 
     def toggle(self):

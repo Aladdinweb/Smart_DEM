@@ -11,7 +11,7 @@ from database import Database, now
 from styles import stylesheet
 
 # Routage par rôle : un utilisateur n'ouvre QUE l'espace de son rôle (aucune navigation vers les autres espaces).
-ROLES = ("accueil", "medecin", "radio", "pharmacie", "labo")
+ROLES = ("accueil", "medecin", "radio", "pharmacie", "labo", "soins", "coord_med", "coord_para")
 
 
 def window_class(role):
@@ -27,6 +27,10 @@ def window_class(role):
         from ui_pharmacy import PharmacyWindow as W
     elif role == "labo":
         from ui_lab import LabWindow as W
+    elif role == "soins":
+        from ui_soins import SoinsWindow as W
+    elif role in ("coord_med", "coord_para"):
+        from ui_coord import CoordWindow as W
     else:
         raise ValueError(f"Rôle inconnu : {role}")
     return W
@@ -51,7 +55,7 @@ def selftest(outfile):
         cfg = Config(); cfg.set("auto_update_check", False)
         db = Database(cfg.db_path)
         for role in ROLES:
-            db.create_user(role.upper(), "Test", role, "", "1234", ["MG"] if role == "medecin" else [])
+            db.create_user(role.upper(), "Test", role, "", "1234", ["MG"] if role == "medecin" else [])      # le rôle sert de code d'espace
             user = db.list_users(roles=[role])[0]
             w = window_class(role)(cfg, db)
             w.set_user(user); w.on_login(); w._allow_close = True; w.close()

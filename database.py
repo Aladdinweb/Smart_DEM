@@ -6,12 +6,12 @@ from datetime import date, datetime, timedelta
 
 from config_manager import resource_path
 from crypto import Crypto
-from data_structures import SERVICE_BY_CODE
+from data_structures import CONSULT_SERVICES, SERVICE_BY_CODE
 from medical_data import DRUGS_SEED
 
 FMT = "%Y-%m-%d %H:%M:%S"
-SCHEMA_VERSION = 3
-ROLES = ("accueil", "medecin", "radio", "pharmacie", "labo")
+SCHEMA_VERSION = 4
+from functions import ALERT_FUNCTIONS, DEFAULT_SERVICES, ROLE_OF, ROLES, default_function, match_function   # noqa: E402
 def _cols(c, table):
     return {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
 
@@ -23,9 +23,9 @@ def _add_col(c, table, ddl):
 
 USERS_DDL = """CREATE TABLE users_new (
     id INTEGER PRIMARY KEY AUTOINCREMENT, last_name TEXT NOT NULL, first_name TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('accueil','medecin','radio','pharmacie','labo')),
+    role TEXT NOT NULL CHECK (role IN ('accueil','medecin','radio','pharmacie','labo','soins','coord_med','coord_para')),
     specialty TEXT, pin_salt TEXT NOT NULL, pin_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
-    signature_b64 TEXT, sign_b64 TEXT, services TEXT, failed_count INTEGER NOT NULL DEFAULT 0, locked_until TEXT, created_at TEXT NOT NULL)"""
+    signature_b64 TEXT, sign_b64 TEXT, services TEXT, function TEXT, failed_count INTEGER NOT NULL DEFAULT 0, locked_until TEXT, created_at TEXT NOT NULL)"""
 
 
 def _m2(c):      # v1 -> v2 : Nom / Prénom séparés
@@ -54,8 +54,29 @@ def _m3(c):      # v2 -> v3 : identifiant patient, isolation multi-comptes, labo
         c.execute("ALTER TABLE users_new RENAME TO users")
 
 
-ENC_FIELDS = {"diagnosis", "notes", "items_json", "canonical", "clinical_info", "instructions", "result_note", "report_text", "data_b64", "payload"}
-MIGRATIONS = {2: _m2, 3: _m3}
+ENC_FIELDS = {"vitals_json", "data_json", "diagnosis", "notes", "items_json", "canonical", "clinical_info", "instructions", "result_note", "report_text", "data_b64", "payload"}
+def _m4(c):      # v3 -> v4 : fonctions officielles, rôles soins / coordinateurs, relève de garde (vitals et drafts créées par schema.sql)
+    for col in ("handover_note TEXT", "handover_from INTEGER", "handover_at TEXT"):
+        _add_col(c, "admissions", col)
+    row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").fetchone()
+    if row and ("'coord_med'" not in row[0] or "function" not in row[0]):
+        keep = [x for x in ("id", "last_name", "first_name", "role", "specialty", "pin_salt", "pin_hash", "active", "signature_b64", "sign_b64",
+                            "services", "failed_count", "locked_until", "created_at") if x in _cols(c, "users")]
+        c.execute("DROP TABLE IF EXISTS users_new")
+        c.execute(USERS_DDL)
+        c.execute(f"INSERT INTO users_new({','.join(keep)}) SELECT {','.join(keep)} FROM users")
+        c.execute("DROP TABLE users")
+        c.execute("ALTER TABLE users_new RENAME TO users")
+    for u in c.execute("SELECT id, role, specialty, services FROM users WHERE function IS NULL OR function=''").fetchall():
+        services = [s for s in (u["services"] or "").split(",") if s]
+        fn = match_function(u["specialty"])
+        if fn and u["role"] in ("accueil", "medecin"):        # ex. compte « Accueil / ATS » -> fonction ATS -> espace Soins & Triage
+            c.execute("UPDATE users SET function=?, role=? WHERE id=?", (fn, ROLE_OF[fn], u["id"]))
+        else:
+            c.execute("UPDATE users SET function=? WHERE id=?", (default_function(u["role"], services), u["id"]))
+
+
+MIGRATIONS = {2: _m2, 3: _m3, 4: _m4}
 
 
 def now():
@@ -133,6 +154,8 @@ RPC_METHODS = (
     "radio_requests_for_doctor", "radio_for_consultation",
     "create_lab_request", "lab_queue", "lab_start", "lab_validate", "lab_requests_for_doctor", "lab_for_consultation",
     "add_result", "list_results", "get_result", "search_patients", "patient_record", "tv_state", "tv_set", "tv_clear",
+    "record_vitals", "vitals_for_admission", "orient_patient", "coord_overview", "reassign_admission", "save_draft", "get_draft", "delete_draft",
+    "handover_start", "handover_list", "take_over", "tv_voice", "tv_announce", "tv_announce_clear", "tv_pairs", "tv_pair", "tv_unpair",
     "tv_screens", "tv_set_screens", "create_appointment", "update_appointment", "delete_appointment", "list_appointments",
     "appointment_days", "stats_report",
 )
@@ -275,6 +298,12 @@ class Database:
             raise PermissionError("Action non autorisée pour votre rôle.")
         return u["role"]
 
+    def _require_fn(self, user_id, functions):
+        self._require(user_id, ("labo",))
+        fn = (self._one("SELECT function FROM users WHERE id=?", (user_id,)) or {}).get("function") or "LABORANTIN"
+        if fn not in functions:
+            raise PermissionError(f"Action réservée à la fonction : {', '.join(functions)}.")
+
     def _own_consultation(self, cid, user_id):
         self._require(user_id, ("medecin",))
         c = self._one("SELECT * FROM consultations WHERE id=?", (cid,))
@@ -322,6 +351,7 @@ class Database:
         return {"id": u["id"], "last_name": u["last_name"], "first_name": u["first_name"], "role": u["role"],
                 "specialty": u["specialty"] or "", "active": u["active"],
                 "services": [s for s in (u.get("services") or "").split(",") if s],
+                "function": u.get("function") or default_function(u["role"], [s for s in (u.get("services") or "").split(",") if s]),
                 "has_signature": bool(u["signature_b64"] or u.get("sign_b64"))}
 
     def count_users(self):
@@ -335,23 +365,35 @@ class Database:
             sql += f" AND role IN ({','.join('?' * len(roles))})"; args += list(roles)
         return [self._public_user(u) for u in self._all(sql + " ORDER BY role, last_name, first_name", args)]
 
-    def create_user(self, last_name, first_name, role, specialty, pin, services=()):
-        if role not in ROLES:
-            raise ValueError("Rôle invalide.")
+    @staticmethod
+    def _resolve_function(function, services=()):
+        """`function` = libellé officiel (liste fermée) ou, par compatibilité, un code d'espace (rôle). Retourne (rôle, fonction)."""
+        if function in ROLE_OF:
+            return ROLE_OF[function], function
+        if function in ROLES:
+            return function, default_function(function, services)
+        raise ValueError("Fonction invalide : choisissez dans la liste officielle.")
+
+    def create_user(self, last_name, first_name, function, specialty, pin, services=()):
+        services = list(services if not isinstance(services, str) else services.split(","))
+        role, fn = self._resolve_function(function, services)
         if not (last_name or "").strip() or not (first_name or "").strip():
             raise ValueError("Nom et prénom obligatoires.")
         if not re.fullmatch(r"\d{4}", pin or ""):
             raise ValueError("Le code PIN doit contenir exactement 4 chiffres.")
+        if role == "medecin" and not services:
+            services = DEFAULT_SERVICES.get(fn) or ["MG"]
         salt = secrets.token_hex(16)
         with self._tx() as c:
-            return c.execute("""INSERT INTO users(last_name,first_name,role,specialty,pin_salt,pin_hash,created_at,services)
-                                VALUES (?,?,?,?,?,?,?,?)""", (last_name.strip().upper(), first_name.strip(), role,
-                                                              (specialty or "").strip(), salt, _hash_pin(pin, salt), now(),
-                                                              ",".join(services if not isinstance(services, str) else services.split(",")))).lastrowid
+            return c.execute("""INSERT INTO users(last_name,first_name,role,function,specialty,pin_salt,pin_hash,created_at,services)
+                                VALUES (?,?,?,?,?,?,?,?,?)""", (last_name.strip().upper(), first_name.strip(), role, fn, (specialty or "").strip(),
+                                                                salt, _hash_pin(pin, salt), now(), ",".join(services))).lastrowid
 
     def update_user(self, user_id, fields):
-        allowed = {k: v for k, v in fields.items() if k in ("last_name", "first_name", "role", "specialty", "active", "services")}
-        if "role" in allowed and allowed["role"] not in ROLES:
+        allowed = {k: v for k, v in fields.items() if k in ("last_name", "first_name", "role", "function", "specialty", "active", "services")}
+        if "function" in allowed:
+            allowed["role"], allowed["function"] = self._resolve_function(allowed["function"], allowed.get("services") or ())
+        elif "role" in allowed and allowed["role"] not in ROLES:
             raise ValueError("Rôle invalide.")
         if "last_name" in allowed:
             allowed["last_name"] = allowed["last_name"].strip().upper()
@@ -539,7 +581,7 @@ class Database:
 
     def call_next(self, services, station, user_id, room=None):
         """Appelle le patient prioritaire ; `room` = libellé du bureau affiché sur l'écran TV (jamais de nom de patient)."""
-        self._require(user_id, ("medecin", "labo"))
+        self._require(user_id, ("medecin", "labo", "soins"))
         q = self.queue(services)
         if not q:
             return None
@@ -554,7 +596,7 @@ class Database:
         return row
 
     def recall(self, adm_id, station, user_id, room=None):
-        self._require(user_id, ("medecin", "labo"))
+        self._require(user_id, ("medecin", "labo", "soins"))
         with self._tx() as c:
             c.execute("INSERT INTO calls(admission_id,called_at,station,is_recall) VALUES (?,?,?,1)", (adm_id, now(), room or station))
         row = self.get(adm_id)
@@ -562,16 +604,16 @@ class Database:
         return row
 
     def finish(self, adm_id, user_id):
-        self._require(user_id, ("medecin", "labo"))
+        self._require(user_id, ("medecin", "labo", "soins"))
         with self._tx() as c:
             c.execute("UPDATE admissions SET status='DONE', finished_at=? WHERE id=?", (now(), adm_id))
 
     def release_patient(self, adm_id, user_id):
         """Le patient retourne en file d'attente (changement de médecin / de garde) ; la consultation du médecin est marquée interrompue."""
-        self._require(user_id, ("medecin", "labo"))
+        self._require(user_id, ("medecin", "labo", "soins"))
         with self._tx() as c:
-            c.execute("UPDATE admissions SET status='WAITING', called_at=NULL, called_by=NULL, called_user_id=NULL WHERE id=? AND called_user_id=?",
-                      (adm_id, user_id))
+            c.execute("""UPDATE admissions SET status='WAITING', called_at=NULL, called_by=NULL, called_user_id=NULL,
+                         handover_note=NULL, handover_from=NULL, handover_at=NULL WHERE id=? AND called_user_id=?""", (adm_id, user_id))
             c.execute("UPDATE consultations SET ended_at=?, outcome='INTERRUPTED' WHERE admission_id=? AND doctor_user_id=? AND ended_at IS NULL",
                       (now(), adm_id, user_id))
 
@@ -592,6 +634,7 @@ class Database:
         with self._tx() as c:
             c.execute("UPDATE consultations SET ended_at=?, notes=?, diagnosis=?, outcome='CLOSED' WHERE id=?", (now(), self._enc(notes), self._enc(diagnosis), cid))
             c.execute("UPDATE admissions SET status='DONE', finished_at=COALESCE(finished_at,?) WHERE id=?", (now(), cons["admission_id"]))
+            c.execute("DELETE FROM drafts WHERE admission_id=?", (cons["admission_id"],))
         d = self.consultation_dossier(cid)
         if self.sync_enabled:                                  # file de synchronisation hors-ligne (FHIR)
             from fhir import consultation_bundle
@@ -811,7 +854,7 @@ class Database:
         return self._labs("WHERE l.id=?", (request_id,))[0]
 
     def lab_validate(self, request_id, note="", user_id=None):
-        self._require(user_id, ("labo",))
+        self._require_fn(user_id, ("LABORANTIN",))
         with self._tx() as c:
             c.execute("UPDATE lab_requests SET status='DONE', done_at=?, tech_user_id=? WHERE id=?", (now(), user_id, request_id))
         return self._labs("WHERE l.id=?", (request_id,))[0]
@@ -822,12 +865,15 @@ class Database:
         return sorted(self._labs("WHERE l.doctor_user_id=? AND l.created_at>=?", (user_id, since)), key=lambda r: -r["id"])
 
     def lab_for_consultation(self, cid, user_id=None):
-        self._require(user_id, ("medecin", "labo"))
+        self._require(user_id, ("medecin", "labo", "soins"))
         return self._labs("WHERE l.consultation_id=?", (cid,))
 
     # ---------- résultats : cliché / compte rendu (radio) et résultats (labo) renvoyés au médecin demandeur ----------
     def add_result(self, kind, request_id, filename, mime, data_b64, report_text, user_id=None):
-        self._require(user_id, ("radio",) if kind == "radio" else ("labo",))
+        if kind == "lab":
+            self._require_fn(user_id, ("LABORANTIN",))
+        else:
+            self._require(user_id, ("radio",))
         if kind not in ("radio", "lab"):
             raise ValueError("Type de résultat invalide.")
         if data_b64 and len(data_b64) > 12_000_000:
@@ -904,13 +950,193 @@ class Database:
                 v["prescriptions"] = [self._rx(x["uuid"]) for x in self._all("SELECT uuid FROM prescriptions WHERE admission_id=? ORDER BY id", (r["id"],))]
                 v["lab_requests"] = self._labs("WHERE l.admission_id=?", (r["id"],))
                 v["radiology"] = self._all(_RADIO_SELECT + " WHERE r.admission_id=? ORDER BY r.id", (r["id"],))
+                v["vitals"] = self._vitals(r["id"])
             visits.append(v)
         return {"level": role, "patient": {"display": display_name(a), "birth": birth_text(a), "gender": a["gender"],
                                            "ident": a["patient_ident"] or ""}, "visits": visits}
 
-    # ---------- écran TV : flux d'affichage piloté par l'accueil ----------
+    # ---------- constantes vitales & orientation (poste Soins & Triage) ----------
+    _TENSION = {"mmHg": (40, 300, 20, 200), "cmHg": (4, 30, 2, 20)}
+    _GLYC = {"g/L": (0.1, 10), "mmol/L": (0.5, 55)}
+
+    @staticmethod
+    def _num(v, label):
+        try:
+            return float(str(v).replace(",", "."))
+        except ValueError:
+            raise ValueError(f"{label} : valeur numérique attendue.")
+
+    def _vitals(self, adm_id):
+        out = []
+        for r in self._all("""SELECT v.id, v.recorded_at, v.vitals_json, u.last_name, u.first_name, u.function FROM vitals v
+                              LEFT JOIN users u ON u.id=v.user_id WHERE v.admission_id=? ORDER BY v.id DESC""", (adm_id,)):
+            d = json.loads(r.pop("vitals_json")); d.update(r); out.append(d)
+        return out
+
+    def record_vitals(self, adm_id, data, user_id=None):
+        """Enregistre tension, glycémie, température (+ remarque) dans le dossier. Contrôle de plausibilité uniquement (pas d'interprétation clinique)."""
+        self._require(user_id, ("soins", "medecin"))
+        v = {}
+        if str(data.get("sys", "")).strip() or str(data.get("dia", "")).strip():
+            unit = data.get("tension_unit", "mmHg")
+            if unit not in self._TENSION:
+                raise ValueError("Unité de tension invalide.")
+            smin, smax, dmin, dmax = self._TENSION[unit]
+            sys_, dia = self._num(data.get("sys"), "Tension systolique"), self._num(data.get("dia"), "Tension diastolique")
+            if not (smin <= sys_ <= smax and dmin <= dia <= dmax and dia < sys_):
+                raise ValueError(f"Tension impossible pour l'unité {unit} : vérifiez la saisie.")
+            v.update(sys=round(sys_, 1), dia=round(dia, 1), tension_unit=unit)
+        if str(data.get("glyc", "")).strip():
+            unit = data.get("glyc_unit", "g/L")
+            if unit not in self._GLYC:
+                raise ValueError("Unité de glycémie invalide.")
+            g = self._num(data["glyc"], "Glycémie")
+            if not (self._GLYC[unit][0] <= g <= self._GLYC[unit][1]):
+                raise ValueError(f"Glycémie impossible pour l'unité {unit} : vérifiez la saisie.")
+            v.update(glyc=round(g, 2), glyc_unit=unit)
+        if str(data.get("temp", "")).strip():
+            t = self._num(data["temp"], "Température")
+            if not 30 <= t <= 45:
+                raise ValueError("Température impossible (30 à 45 °C) : vérifiez la saisie.")
+            v["temp"] = round(t, 1)
+        if (data.get("note") or "").strip():
+            v["note"] = data["note"].strip()[:300]
+        if not v:
+            raise ValueError("Saisissez au moins une constante.")
+        with self._tx() as c:
+            vid = c.execute("INSERT INTO vitals(admission_id,user_id,recorded_at,vitals_json) VALUES (?,?,?,?)",
+                            (adm_id, user_id, now(), self._enc(json.dumps(v, ensure_ascii=False)))).lastrowid
+            self._audit(c, adm_id, "VITALS", {"user": user_id}, "")
+        return next(x for x in self._vitals(adm_id) if x["id"] == vid)
+
+    def vitals_for_admission(self, adm_id, user_id=None):
+        self._require(user_id, ("soins", "medecin", "coord_para"))
+        return self._vitals(adm_id)
+
+    def orient_patient(self, adm_id, service_code, triage, user_id=None):
+        """Après les constantes : oriente le patient vers la file d'un service médical avec son niveau de tri (le ticket garde son numéro)."""
+        self._require(user_id, ("soins",))
+        if service_code not in CONSULT_SERVICES:
+            raise ValueError("Service d'orientation invalide.")
+        svc = SERVICE_BY_CODE[service_code]
+        if svc["triage"] and triage not in ("VERT", "ORANGE", "ROUGE"):
+            raise ValueError("Choisissez le niveau de tri (vert / orange / rouge).")
+        with self._tx() as c:
+            a = c.execute("SELECT * FROM admissions WHERE id=?", (adm_id,)).fetchone()
+            if not a or a["status"] in ("DONE", "CANCELLED"):
+                raise ValueError("Patient introuvable ou déjà pris en charge.")
+            c.execute("""UPDATE admissions SET service_code=?, triage_level=?, status='WAITING', called_at=NULL, called_by=NULL, called_user_id=NULL,
+                         handover_note=NULL, handover_from=NULL, handover_at=NULL WHERE id=?""",
+                      (service_code, triage if svc["triage"] else None, adm_id))
+            c.execute("DELETE FROM drafts WHERE admission_id=? AND kind='soins'", (adm_id,))
+            self._audit(c, adm_id, "ORIENT", {"from": a["service_code"], "to": service_code, "triage": triage, "user": user_id}, "")
+        return self.get(adm_id)
+
+    # ---------- vues globales des coordinateurs ----------
+    def _coord_scope(self, user_id):
+        role = self._require(user_id, ("coord_med", "coord_para"))
+        return role, (["SOINS"] if role == "coord_para" else list(CONSULT_SERVICES))
+
+    def coord_overview(self, user_id=None):
+        """Vue globale multi-services de la garde en cours : files, appels, urgences, temps d'attente, relèves en cours."""
+        role, scope = self._coord_scope(user_id)
+        sh = self._one("SELECT id FROM shifts WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1")
+        rows = self._all(f"SELECT * FROM admissions WHERE shift_id=? AND service_code IN ({','.join('?' * len(scope))}) AND status!='CANCELLED'",
+                         [sh["id"] if sh else -1] + scope)
+        by = {c: {"code": c, "waiting": 0, "called": 0, "done": 0, "red": 0, "oldest_wait": 0, "avg_wait": None, "_w": []} for c in scope}
+        waiting, handovers, ref = [], 0, datetime.now()
+        for r in rows:
+            b = by[r["service_code"]]
+            created = datetime.strptime(r["created_at"], FMT)
+            if r["status"] == "WAITING":
+                m = int((ref - created).total_seconds() // 60)
+                b["waiting"] += 1; b["oldest_wait"] = max(b["oldest_wait"], m); b["red"] += r["triage_level"] == "ROUGE"
+                waiting.append({"id": r["id"], "ticket_label": r["ticket_label"], "service_code": r["service_code"], "display": display_name(r),
+                                "age": age_from_row(r), "triage_level": r["triage_level"], "wait_min": m})
+            elif r["status"] == "CALLED":
+                b["called"] += 1; handovers += 1 if r["handover_at"] else 0
+            elif r["status"] == "DONE":
+                b["done"] += 1
+            if r["called_at"]:
+                b["_w"].append((datetime.strptime(r["called_at"], FMT) - created).total_seconds() / 60)
+        for b in by.values():
+            w = b.pop("_w"); b["avg_wait"] = round(sum(w) / len(w), 1) if w else None
+        order = {"ROUGE": 0, "ORANGE": 1}
+        waiting.sort(key=lambda x: (order.get(x["triage_level"], 2), -x["wait_min"]))
+        return {"role": role, "scope": scope, "by_service": list(by.values()), "waiting": waiting, "handovers": handovers, "total": len(rows)}
+
+    def reassign_admission(self, adm_id, new_service, user_id=None):
+        """Le coordinateur réoriente un patient EN ATTENTE vers un autre service (le ticket garde son numéro)."""
+        self._coord_scope(user_id)
+        if new_service not in CONSULT_SERVICES and new_service != "SOINS":
+            raise ValueError("Service invalide.")
+        svc = SERVICE_BY_CODE[new_service]
+        with self._tx() as c:
+            a = c.execute("SELECT * FROM admissions WHERE id=?", (adm_id,)).fetchone()
+            if not a or a["status"] != "WAITING":
+                raise ValueError("Seul un patient en attente peut être réorienté.")
+            c.execute("UPDATE admissions SET service_code=?, triage_level=? WHERE id=?",
+                      (new_service, a["triage_level"] if svc["triage"] else None, adm_id))
+            self._audit(c, adm_id, "REASSIGN", {"from": a["service_code"], "to": new_service, "user": user_id}, "")
+        return self.get(adm_id)
+
+    # ---------- relève de garde : patient réservé pour un confrère + brouillons ----------
+    def save_draft(self, adm_id, kind, data, user_id=None):
+        self._require(user_id, ("medecin", "soins", "labo"))
+        with self._tx() as c:
+            c.execute("""INSERT INTO drafts(admission_id,user_id,kind,data_json,updated_at) VALUES (?,?,?,?,?)
+                         ON CONFLICT(admission_id,user_id,kind) DO UPDATE SET data_json=excluded.data_json, updated_at=excluded.updated_at""",
+                      (adm_id, user_id, kind, self._enc(json.dumps(data, ensure_ascii=False)), now()))
+
+    def get_draft(self, adm_id, kind, user_id=None):
+        self._require(user_id, ("medecin", "soins", "labo"))
+        r = self._one("SELECT data_json FROM drafts WHERE admission_id=? AND user_id=? AND kind=?", (adm_id, user_id, kind))
+        return json.loads(r["data_json"]) if r else None
+
+    def delete_draft(self, adm_id, kind, user_id=None):
+        self._require(user_id, ("medecin", "soins", "labo"))
+        with self._tx() as c:
+            c.execute("DELETE FROM drafts WHERE admission_id=? AND user_id=? AND kind=?", (adm_id, user_id, kind))
+
+    def handover_start(self, adm_id, note="", user_id=None):
+        """Relève de garde : le patient en cours est réservé (hors file d'attente) jusqu'à reprise par un confrère de même rôle."""
+        self._require(user_id, ("medecin", "soins", "labo"))
+        with self._tx() as c:
+            a = c.execute("SELECT * FROM admissions WHERE id=?", (adm_id,)).fetchone()
+            if not a or a["status"] != "CALLED" or a["called_user_id"] != user_id:
+                raise ValueError("Ce patient n'est pas en cours avec vous.")
+            c.execute("UPDATE admissions SET called_user_id=NULL, handover_from=?, handover_at=?, handover_note=? WHERE id=?",
+                      (user_id, now(), (note or "").strip()[:300], adm_id))
+            self._audit(c, adm_id, "HANDOVER_START", {"user": user_id}, "")
+
+    def handover_list(self, services, user_id=None):
+        role = self._require(user_id, ("medecin", "soins", "labo"))
+        if not services:
+            return []
+        return self._all(f"""SELECT a.*, u.last_name AS from_last, u.first_name AS from_first, u.function AS from_function FROM admissions a
+                             JOIN users u ON u.id=a.handover_from WHERE a.status='CALLED' AND a.handover_at IS NOT NULL AND u.role=?
+                             AND a.service_code IN ({','.join('?' * len(services))}) ORDER BY a.handover_at""", [role] + list(services))
+
+    def take_over(self, adm_id, user_id=None):
+        """Reprise d'un patient réservé : consultation, brouillons et suivi passent au nouveau titulaire (traçé)."""
+        role = self._require(user_id, ("medecin", "soins", "labo"))
+        with self._tx() as c:
+            a = c.execute("""SELECT a.*, u.role AS from_role FROM admissions a LEFT JOIN users u ON u.id=a.handover_from WHERE a.id=?""", (adm_id,)).fetchone()
+            if not a or a["handover_at"] is None or a["status"] != "CALLED":
+                raise ValueError("Ce patient n'est plus en attente de reprise.")
+            if a["from_role"] != role:
+                raise PermissionError("Reprise possible uniquement par un professionnel de même rôle.")
+            old = a["handover_from"]
+            c.execute("""UPDATE admissions SET called_user_id=?, handover_note=NULL, handover_from=NULL, handover_at=NULL WHERE id=?""", (user_id, adm_id))
+            c.execute("UPDATE consultations SET doctor_user_id=? WHERE admission_id=? AND ended_at IS NULL", (user_id, adm_id))
+            c.execute("DELETE FROM drafts WHERE admission_id=? AND user_id=?", (adm_id, user_id))
+            c.execute("UPDATE drafts SET user_id=? WHERE admission_id=? AND user_id=?", (user_id, adm_id, old))
+            self._audit(c, adm_id, "TAKE_OVER", {"from": old, "to": user_id}, "")
+        return self.get(adm_id)
+
+    # ---------- écran TV : flux d'affichage, voix, annonces, appariement ----------
     def tv_state(self):
-        return {"message": self._meta("tv_message"), "paused": self._meta("tv_paused") == "1"}
+        return {"message": self._meta("tv_message"), "paused": self._meta("tv_paused") == "1", "voice": self._meta("tv_voice", "1") == "1"}
 
     def tv_set(self, message, paused, user_id=None):
         self._require(user_id, ("accueil",))
@@ -921,9 +1147,78 @@ class Database:
         self._tv_notify({"type": "state", **st})
         return st
 
+    def tv_voice(self, enabled, user_id=None):
+        """Active / coupe la VOIX des écrans (le bip reste actif)."""
+        self._require(user_id, ("accueil", "coord_med", "coord_para"))
+        with self._tx() as c:
+            self._set_meta(c, "tv_voice", "1" if enabled else "0")
+        st = self.tv_state()
+        self._tv_notify({"type": "state", **st})
+        return st
+
     def tv_clear(self, user_id=None):
         self._require(user_id, ("accueil",))
         self._tv_notify({"type": "clear"})
+
+    def _may_alert(self, user_id):
+        role = self._require(user_id, ("accueil", "coord_med", "coord_para", "medecin"))
+        if role == "medecin":
+            fn = (self._one("SELECT function FROM users WHERE id=?", (user_id,)) or {}).get("function")
+            if fn not in ALERT_FUNCTIONS:
+                raise PermissionError("Les alertes sont réservées à l'accueil, aux coordinateurs et au responsable des urgences.")
+
+    def tv_announce(self, text, level="INFO", seconds=60, user_id=None):
+        """Bandeau dynamique sur les écrans (INFO / ALERTE / URGENCE), temporisé."""
+        self._may_alert(user_id)
+        text, level = (text or "").strip()[:200], (level or "INFO").upper()
+        if not text or level not in ("INFO", "ALERTE", "URGENCE"):
+            raise ValueError("Message vide ou niveau invalide.")
+        ann = {"type": "announce", "id": uuid.uuid4().hex[:8], "text": text, "level": level, "seconds": max(5, min(int(seconds), 3600))}
+        with self._tx() as c:
+            self._audit(c, None, "TV_ANNOUNCE", {"level": level, "user": user_id}, "")
+        self._tv_notify(ann)
+        return ann["id"]
+
+    def tv_announce_clear(self, ann_id="*", user_id=None):
+        self._may_alert(user_id)
+        self._tv_notify({"type": "announce_clear", "id": ann_id})
+
+    def tv_pairs(self):
+        try:
+            d = json.loads(self._meta("tv_pairs") or "{}")
+        except ValueError:
+            d = {}
+        return [{"token": t, "screen": v["screen"], "paired_at": v["at"]} for t, v in d.items()]
+
+    def tv_binding(self, token):
+        return next((p["screen"] for p in self.tv_pairs() if p["token"] == token), None)
+
+    def tv_pair(self, code, screen_id, user_id=None):
+        """Appariement par code court (TV-4092) : l'accueil saisit le code affiché par la TV et choisit l'écran à lui associer."""
+        self._require(user_id, ("accueil",))
+        if not any(s["id"] == screen_id for s in self.tv_screens()):
+            raise ValueError("Écran inconnu : créez-le d'abord dans Paramètres › Réseau & Écrans TV.")
+        hook = getattr(self, "tv_pair_hook", None)
+        if hook is None:
+            raise ValueError("Appariement impossible : le Hub (serveur des écrans) n'est pas démarré.")
+        fails = [t for t in getattr(self, "_pair_fails", []) if t > datetime.now().timestamp() - 60]
+        if len(fails) >= 5:
+            raise ValueError("Trop de tentatives : patientez une minute.")
+        token = hook(code)
+        if not token:
+            self._pair_fails = fails + [datetime.now().timestamp()]
+            raise ValueError("Code inconnu ou expiré : relancez l'affichage du code sur la TV.")
+        with self._tx() as c:
+            d = {p["token"]: {"screen": p["screen"], "at": p["paired_at"]} for p in self.tv_pairs()}
+            d[token] = {"screen": screen_id, "at": now()}
+            self._set_meta(c, "tv_pairs", json.dumps(d))
+        return True
+
+    def tv_unpair(self, token, user_id=None):
+        self._require(user_id, ("accueil",))
+        with self._tx() as c:
+            d = {p["token"]: {"screen": p["screen"], "at": p["paired_at"]} for p in self.tv_pairs() if p["token"] != token}
+            self._set_meta(c, "tv_pairs", json.dumps(d))
 
     # ---------- écrans TV multiples (dispatching par service) ----------
     def tv_screens(self):
