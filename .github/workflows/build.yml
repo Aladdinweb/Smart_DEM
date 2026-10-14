@@ -32,7 +32,13 @@ jobs:
         run: pip install -r requirements.txt pyinstaller
 
       - name: Tests (données, migration, Hub, SemVer — bloquants)
-        run: python -m unittest tests.test_core tests.test_packaging -v
+        run: python -m unittest tests.test_core tests.test_v140 tests.test_packaging -v
+
+      - name: Logo officiel (en-tête et impressions)
+        shell: pwsh
+        run: |
+          if (Test-Path assets/logo_ministere.png) { "Logo officiel présent : il sera embarqué dans l'exécutable." }
+          else { "::warning title=Logo officiel absent::assets/logo_ministere.png est introuvable : l'en-tête et les impressions afficheront le drapeau seul. Ajoutez le fichier au dépôt (ou importez-le dans Paramètres)." }
 
       - name: Test de fumée de l'interface (Qt hors écran) — non bloquant pour l'instant
         continue-on-error: true      # passer à false une fois ce test vert de façon stable

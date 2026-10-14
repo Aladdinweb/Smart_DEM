@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QComboBox, QFrame, QHBoxLayout, 
 from data_structures import CONSULT_SERVICES, SERVICE_BY_CODE
 from styles import TRIAGE_ICON, TRIAGE_TEXT
 from ui_common import BaseWindow, guard, open_tv
+from ui_dpi import PatientSearchDialog
 from ui_tv import AnnounceDialog
 
 
@@ -26,6 +27,8 @@ class CoordWindow(BaseWindow):
             b = QPushButton(label); b.clicked.connect(fn); self.header_extra.addWidget(b)
         if cfg.get("tv_screen"):
             t = QPushButton("📺 Ouvrir l'écran TV"); t.clicked.connect(lambda *_: open_tv(self.cfg)); self.header_extra.addWidget(t)
+        if cfg.get("role") == "coord_para":
+            d = QPushButton("🔎 Dossiers patients"); d.clicked.connect(self.open_dpi); self.header_extra.addWidget(d)
         tabs = QTabWidget(); self.content.addWidget(tabs, 1)
         w1 = QWidget(); v1 = QVBoxLayout(w1)
         self.kpi = QLabel(""); self.kpi.setStyleSheet("font-size:17px;font-weight:700;"); self.kpi.setTextFormat(Qt.TextFormat.PlainText)
@@ -89,6 +92,11 @@ class CoordWindow(BaseWindow):
     def open_alert(self, *_):
         if self.user:
             AnnounceDialog(self.db, self.user["id"], self).exec()
+
+    @guard
+    def open_dpi(self, *_):
+        if self.user:
+            PatientSearchDialog(self.db, self.user, self.cfg, self).exec()
 
     @guard
     def toggle_voice(self, *_):

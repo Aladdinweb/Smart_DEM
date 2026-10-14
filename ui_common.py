@@ -4,7 +4,7 @@ from datetime import datetime
 
 from PyQt6.QtCore import QProcess, QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
+from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QSizePolicy,
                              QPushButton, QVBoxLayout, QWidget)
 
 from branding import HeaderBar
@@ -13,6 +13,7 @@ from data_structures import SERVICE_BY_CODE
 import userdata
 from database import FMT
 from functions import honorific
+from ui_layout import FlowLayout, profile
 
 ROLE_LABELS = {"accueil": "Accueil Général", "dedie": "Accueil dédié"}
 USER_ROLE_LABELS = {"accueil": "Accueil", "medecin": "Consultation", "radio": "Radiologie", "pharmacie": "Pharmacie", "labo": "Laboratoire",
@@ -79,9 +80,12 @@ class BaseWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         self.root = QVBoxLayout(central)
-        self.root.setContentsMargins(14, 10, 14, 10)
-        self.root.setSpacing(10)
-        self.root.addWidget(HeaderBar(cfg))
+        compact = profile(cfg)["compact"]
+        self.root.setContentsMargins(8, 6, 8, 6) if compact else self.root.setContentsMargins(14, 10, 14, 10)
+        self.root.setSpacing(6 if compact else 10)
+        self._msg_after, self._msg_first, self._popups = 0, True, []
+        self.prof = profile(cfg)
+        self.root.addWidget(HeaderBar(cfg, 44 if self.prof["compact"] else 64))
         self.root.addWidget(self._build_header())
         self.content_widget = QWidget()
         self.content = QVBoxLayout(self.content_widget)
@@ -96,28 +100,161 @@ class BaseWindow(QMainWindow):
         if cfg.get("auto_update_check", True):
             QTimer.singleShot(6000, self._auto_update_check)
         QTimer.singleShot(2500, self._check_update_result)
+        self._msg_timer = QTimer(self); self._msg_timer.timeout.connect(self._poll_messages); self._msg_timer.start(5000)
+        self._set_badge(0)
 
     def _build_header(self):
         f = QFrame(); f.setObjectName("card")
-        h = QHBoxLayout(f)
+        f.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)        # l'en-tête ne force jamais la largeur de la fenêtre (retour à la ligne)
+        outer = QVBoxLayout(f); outer.setContentsMargins(8, 6, 8, 6); outer.setSpacing(4)
+        self.hdr1, self.hdr2 = QHBoxLayout(), QHBoxLayout()
+        outer.addLayout(self.hdr1); outer.addLayout(self.hdr2)
         self.user_chip = QLabel("")
         self.user_chip.setStyleSheet("font-size:16px;font-weight:700;color:#4f9dff;"); self.user_chip.setTextFormat(Qt_PlainText())
         self.sub = QLabel(f"{ROLE_LABELS.get(self.cfg.get('role'), '')}  •  {self.station}")
         self.sub.setStyleSheet("color:#8b97a7;")
         box = QVBoxLayout(); box.addWidget(self.user_chip); box.addWidget(self.sub)
-        h.addLayout(box, 1)
-        self.header_extra = QHBoxLayout()
-        h.addLayout(self.header_extra)
-        b_out = QPushButton("🔒 Déconnexion"); b_out.clicked.connect(self.logout)
-        b_set = QPushButton("⚙ Paramètres"); b_set.clicked.connect(self.open_settings)
-        b_quit = QPushButton("⏻ Quitter"); b_quit.setObjectName("danger"); b_quit.clicked.connect(self.request_quit)
-        for b in (b_out, b_set, b_quit):
-            h.addWidget(b)
+        self.hdr1.addLayout(box, 1)
+        self.extra_box = QWidget(); self.extra_box.setStyleSheet("background:transparent;")
+        self.header_extra = FlowLayout(self.extra_box, 6)
+        self.btn_msg = QPushButton("✉ Messages"); self.btn_msg.clicked.connect(self.open_messages)
+        self.btn_docs = QPushButton("📄 Modèles"); self.btn_docs.clicked.connect(self.open_templates); self.btn_docs.setVisible(False)
+        self.b_out = QPushButton("🔒 Déconnexion"); self.b_out.clicked.connect(self.logout)
+        self.b_set = QPushButton("⚙ Paramètres"); self.b_set.clicked.connect(self.open_settings)
+        self.b_quit = QPushButton("⏻ Quitter"); self.b_quit.setObjectName("danger"); self.b_quit.clicked.connect(self.request_quit)
+        self.std_buttons = (self.btn_msg, self.btn_docs, self.b_out, self.b_set, self.b_quit)
+        self._two = None
+        self._place_header(bool(self.prof["two_rows"]))
         return f
+
+    _FULL = {"b_out": "🔒 Déconnexion", "b_set": "⚙ Paramètres", "b_quit": "⏻ Quitter", "btn_msg": "✉ Messages", "btn_docs": "📄 Modèles"}
+    _SHORT = {"b_out": "🔒", "b_set": "⚙", "b_quit": "⏻", "btn_msg": "✉", "btn_docs": "📄"}
+
+    def _place_header(self, two):
+        """16:9 large : tous les boutons sur une ligne ; 4:3 / largeur insuffisante : boutons du poste sur une 2e ligne, boutons standard raccourcis."""
+        self._two = two
+        for lay in (self.hdr1, self.hdr2):
+            lay.removeWidget(self.extra_box)
+            for b in self.std_buttons:
+                lay.removeWidget(b)
+        while self.hdr2.count():
+            self.hdr2.takeAt(0)                              # retire le stretch éventuel
+        if two:
+            self.hdr2.addWidget(self.extra_box); self.hdr2.addStretch(1)
+        else:
+            self.hdr1.addWidget(self.extra_box)
+        for b in self.std_buttons:
+            self.hdr1.addWidget(b)
+        for name, full in self._FULL.items():
+            b = getattr(self, name)
+            if name == "btn_msg":
+                continue                                     # libellé géré par _set_badge
+            b.setText(self._SHORT[name] if two else full); b.setToolTip(full[2:] if two else "")
+        self.extra_box.setVisible(self.header_extra.count() > 0 or not two)
+        self._set_badge(getattr(self, "_unread", 0))
+
+    def _auto_header(self):
+        fm = self.fontMetrics()
+        need = 300 + sum(self.header_extra.itemAt(i).sizeHint().width() + 6 for i in range(self.header_extra.count())
+                         if not self.header_extra.itemAt(i).isEmpty()) + sum(fm.horizontalAdvance(t) + 40 for t in self._FULL.values()) + 60
+        want = bool(self.prof["two_rows"]) or need > self.width()
+        if want != getattr(self, "_two", None):
+            self._place_header(want)
+        self.extra_box.setVisible(self.header_extra.count() > 0)     # les boutons du poste sont ajoutés par la sous-classe, après la construction
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._auto_header()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._auto_header()
+
+    # ---------- messagerie interne & modèles de documents ----------
+    def _set_badge(self, n):
+        self._unread = n
+        self.btn_msg.setText(("✉ Messages" if not getattr(self, "_two", False) else "✉") + (f" ({n})" if n else ""))
+        self.btn_msg.setToolTip("Messagerie interne : signalements et convocations")
+        self.btn_msg.setStyleSheet("background:#f39c12;color:white;font-weight:700;" if n else "")
+
+    def _poll_messages(self):
+        if not self.user:
+            return
+        try:
+            p = self.db.messages_poll(self.user["id"], self._msg_after)
+        except (ConnectionError, PermissionError, OSError):
+            return
+        self._set_badge(p["unread"])
+        new = p["new"]
+        if not new:
+            return
+        self._msg_after = max(m["id"] for m in new)
+        urgent = [m for m in new if m["kind"] == "CONVOCATION" or m["priority"] == "URGENT"]
+        if self._msg_first:
+            self.show_banner(f"✉ {p['unread']} message(s) non lu(s)", "info", 8000)
+        else:
+            m = new[-1]
+            self.show_banner(f"✉ {m['from_name']} : {m['reason']}", "info", 8000)
+        self._msg_first = False
+        QApplication.beep()
+        from ui_messages import MessagePopup
+        self._popups = [x for x in self._popups if x.isVisible()]
+        for m in urgent[:3]:
+            pop = MessagePopup(self.db, self.user, m, self.open_messages, self)
+            pop.show(); self._popups.append(pop)
+
+    def open_messages(self, *_):
+        if not self.user:
+            return
+        from ui_messages import MessagesDialog
+        try:
+            MessagesDialog(self.db, self.user, self.station, self).exec()
+        except (ConnectionError, PermissionError) as e:
+            self.show_banner(f"⚠️ {e}", "error")
+        self._poll_messages()
+
+    def open_appointments(self, prefill=None, *_):
+        """Rendez-vous de tous les services (calendrier, ticket QR, arrivée du patient)."""
+        if not self.user:
+            return
+        from ui_appointments import AppointmentsDialog
+        dlg = AppointmentsDialog(self.db, self.cfg, self.user, self, prefill if isinstance(prefill, dict) else None)
+        if hasattr(self, "refresh"):
+            dlg.panel.changed.connect(self.refresh)
+        dlg.exec()
+
+    def open_documents(self, adm=None, service="", *_):
+        """Certificats, fiches et formulaires du rôle (modèles importés ou standard)."""
+        if not self.user:
+            return
+        from ui_templates import DocumentDialog
+        try:
+            DocumentDialog(self.db, self.cfg, self.user, adm if isinstance(adm, dict) else None, service, self).exec()
+        except (ConnectionError, PermissionError) as e:
+            self.show_banner(f"⚠️ {e}", "error")
+
+    def open_templates(self, *_):
+        if not self.user:
+            return
+        from ui_templates import TemplatesDialog
+        try:
+            TemplatesDialog(self.db, self.user, self).exec()
+        except (ConnectionError, PermissionError) as e:
+            self.show_banner(f"⚠️ {e}", "error")
 
     # ---------- session ----------
     def set_user(self, user):
         self.user = user
+        self._msg_after, self._msg_first = 0, True
+        for p in self._popups:
+            p.close()
+        self._popups = []
+        try:
+            from doc_models import kinds_for
+            self.btn_docs.setVisible(bool(kinds_for(user["role"], user.get("function"))))
+        except Exception:
+            pass
+        QTimer.singleShot(400, self._poll_messages)
         extra = f" — {user['specialty']}" if user.get("specialty") else ""
         self.user_chip.setText(f"👤 {user_label(user)}  •  {user.get('function') or USER_ROLE_LABELS.get(user['role'], '')}{extra}")
         try:

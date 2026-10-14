@@ -18,6 +18,7 @@ from documents import header_html
 from printer import physical_printers, print_document, print_ticket
 from reports import report_csv, report_html
 from styles import stylesheet
+from ui_layout import FORMATS, profile
 from ui_common import open_tv, quit_now, restart_app
 from ui_login import UsersDialog
 from ui_setup import NetworkForm, StructureRoleForm
@@ -205,7 +206,12 @@ class SettingsDialog(QDialog):
         self.pin2 = QLineEdit(); self.pin2.setEchoMode(QLineEdit.EchoMode.Password)
         self.theme = QComboBox(); self.theme.addItem("Sombre", "dark"); self.theme.addItem("Clair", "light")
         self.theme.setCurrentIndex(0 if cfg.get("theme") != "light" else 1)
+        self.fmt = QComboBox()
+        for k, lab in FORMATS.items():
+            self.fmt.addItem(lab, k)
+        self.fmt.setCurrentIndex(max(0, self.fmt.findData(cfg.get("screen_format", "auto"))))
         sf.addRow("Nouveau PIN administrateur (vide = inchangé) :", self.pin1); sf.addRow("Confirmer :", self.pin2); sf.addRow("Thème :", self.theme)
+        sf.addRow("Format d'écran (4:3 / 16:9) :", self.fmt)
         l4.addWidget(sg)
         dg = QGroupBox("Comptes, médicaments, données"); dl = QVBoxLayout(dg)
         crypt = getattr(getattr(db, "crypto", None), "available", None)
@@ -413,14 +419,14 @@ class SettingsDialog(QDialog):
         changed = any(self.cfg.get(k) != v for k, v in vals.items())
         self.cfg.update(vals)
         self.cfg.update({"revisit_check_hours": self.revisit.value(), "printer": self.printer.currentData(), "doc_printer": self.docprinter.currentData(),
-                         "paper_width_mm": self.paper.currentData(), "theme": self.theme.currentData(), "auto_update_check": self.auto.isChecked(),
+                         "paper_width_mm": self.paper.currentData(), "theme": self.theme.currentData(), "screen_format": self.fmt.currentData(), "auto_update_check": self.auto.isChecked(),
                          "github_repo": self.repo.text().strip(), "tpl_margins_mm": self.margins.text().strip(), "tv_screen": self.tv_screen.currentData(),
                          "tv_autostart": self.tv_auto.isChecked(), "sync_enabled": self.sync_on.isChecked(), "sync_endpoint": self.sync_url.text().strip(),
                          "sync_token": self.sync_tok.text()})
         if self.pin1.text():
             self.cfg.set_pin(self.pin1.text())
         self.cfg.save()
-        QApplication.instance().setStyleSheet(stylesheet(self.cfg.get("theme")))
+        QApplication.instance().setStyleSheet(stylesheet(self.cfg.get("theme"), profile(self.cfg)["compact"]))
         parent = self.parent()
         self.accept()
         if changed:

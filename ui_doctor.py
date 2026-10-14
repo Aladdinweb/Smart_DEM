@@ -39,12 +39,13 @@ class DoctorWindow(BaseWindow):
         self._last_draft = None
         self.btn_hand = QPushButton("📥 Reprises (0)"); self.btn_hand.clicked.connect(self.open_handovers); self.header_extra.addWidget(self.btn_hand)
         self.btn_alert = QPushButton("🚨 Alerte TV"); self.btn_alert.clicked.connect(self.open_alert); self.btn_alert.setVisible(False); self.header_extra.addWidget(self.btn_alert)
-        for label, fn in (("🔁 Relève de garde / Changer de compte", self.logout), ("🔎 Dossiers patients", self.open_dpi), ("🖋 Mon profil", self.open_profile)):
+        for label, fn in (("🔁 Relève de garde / Changer de compte", self.logout), ("🔎 Dossiers patients", self.open_dpi), ("📅 Rendez-vous", self.rdv),
+                          ("📝 Documents et certificats", self.documents), ("🖋 Mon profil", self.open_profile)):
             b = QPushButton(label); b.clicked.connect(fn); self.header_extra.addWidget(b)
         if cfg.get("tv_screen"):
             b = QPushButton("📺 Ouvrir l'écran TV"); b.clicked.connect(lambda *_: open_tv(self.cfg)); self.header_extra.addWidget(b)
         body = QHBoxLayout(); self.content.addLayout(body, 1)
-        body.addWidget(self._build_queue(), 3)
+        body.addWidget(self._build_queue(), 4 if self.prof["compact"] else 3)
         body.addWidget(self._build_workspace(), 5)
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self.call_next)
         self.t_refresh = QTimer(self); self.t_refresh.timeout.connect(self.refresh); self.t_refresh.start(3000)
@@ -573,6 +574,16 @@ class DoctorWindow(BaseWindow):
     def open_profile(self, *_):
         if self.user:
             ProfileDialog(self.db, self.user, self).exec()
+
+    @guard
+    def rdv(self, *_):
+        a = self.current
+        self.open_appointments({"last_name": a["last_name"], "first_name": a["first_name"], "birth_year": a.get("birth_year"), "gender": a.get("gender"),
+                                "ident": a.get("patient_ident") or ""} if a else None)
+
+    @guard
+    def documents(self, *_):
+        self.open_documents(self.current, (self.user or {}).get("services", [""])[0] if (self.user or {}).get("services") else "")
 
     @guard
     def open_dpi(self, *_):

@@ -247,7 +247,7 @@ class SecurityAndOpsTests(Base):
         ap = self.db.create_appointment({"last_name": "ali", "first_name": "Sam", "date": "2026-10-20", "time": "08:30", "exam": "Bilan"}, self.labo)
         self.db.create_appointment({"last_name": "bob", "first_name": "Tim", "date": "2026-10-21", "time": "09:00"}, self.labo)
         with self.assertRaises(ValueError): self.db.create_appointment({"last_name": "x", "first_name": "y", "date": "20/10/2026", "time": "08:30"}, self.labo)
-        with self.assertRaises(PermissionError): self.db.create_appointment({"last_name": "x", "first_name": "y", "date": "2026-10-20", "time": "08:30"}, self.doc)
+        with self.assertRaises(PermissionError): self.db.create_appointment({"last_name": "x", "first_name": "y", "date": "2026-10-20", "time": "08:30"}, self.pharm)
         self.assertEqual(len(self.db.list_appointments("2026-10-20", "2026-10-31", "", self.labo)), 2)
         self.assertEqual([a["last_name"] for a in self.db.list_appointments("2026-10-01", "2026-10-31", "ALI", self.labo)], ["ALI"])
         self.assertEqual(self.db.appointment_days("2026-10", self.labo), {"2026-10-20": 1, "2026-10-21": 1})
@@ -341,7 +341,7 @@ class ImageAndTlsTests(unittest.TestCase):
 class FunctionsAndLabTests(Base):
     def test_official_functions_map_to_spaces(self):
         import functions
-        self.assertEqual(len(functions.LABELS), 20)
+        self.assertEqual(len(functions.LABELS), 22)
         for fn, role in (("AGENT DE BUREAU", "accueil"), ("PÉDIATRE", "medecin"), ("RESPONSABLE URGENCES", "medecin"), ("COORDINATEUR DES MÉDECINS", "coord_med"),
                          ("ATS", "soins"), ("SAGE FEMME", "soins"), ("COORDINATEUR DE PARAMÉDICAL", "coord_para"), ("PRÉLÈVEMENT", "labo"),
                          ("MANIPULATEUR", "radio"), ("PHARMACIEN", "pharmacie")):
@@ -468,7 +468,7 @@ class V3ToV4MigrationTests(unittest.TestCase):
         con.execute("INSERT INTO consultations(admission_id,doctor_user_id,started_at) VALUES (1,2,'2026-10-01 08:10:00')")
         con.commit(); con.close()
         db = Database(path)
-        self.assertEqual(db._one("SELECT value FROM meta WHERE key='schema_version'")["value"], "4")
+        self.assertEqual(db._one("SELECT value FROM meta WHERE key='schema_version'")["value"], "5")
         got = {u["last_name"]: (u["role"], u["function"]) for u in db.list_users(active_only=False)}
         self.assertEqual(got, {"FERAK": ("soins", "ATS"), "DUPONT": ("medecin", "PÉDIATRE"), "RADI": ("radio", "MANIPULATEUR"), "ACC": ("accueil", "AGENT DE BUREAU")})
         self.assertEqual(db._one("SELECT doctor_user_id FROM consultations WHERE id=1")["doctor_user_id"], 2)    # lien conservé
@@ -493,7 +493,7 @@ class MigrationTests(unittest.TestCase):
                        VALUES (1,'LAB',1,'LAB-001','Benali Ahmed','ahmed benali',1990,'H','2026-10-01 08:05:00')""")
         con.commit(); con.close()
         db = Database(path)
-        self.assertEqual(db._one("SELECT value FROM meta WHERE key='schema_version'")["value"], "4")
+        self.assertEqual(db._one("SELECT value FROM meta WHERE key='schema_version'")["value"], "5")
         a = db.get(1); self.assertEqual((a["ticket_label"], a["last_name"], a["first_name"], a["patient_ident"]), ("LAB-001", "Benali Ahmed", "", None))
         self.assertTrue(os.path.isdir(os.path.join(d, "backups")))
         uid = db.create_user("L", "N", "labo", "", "1234"); self.assertTrue(db.verify_pin(uid, "1234")["ok"])   # rôle « labo » accepté

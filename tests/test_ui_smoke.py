@@ -98,7 +98,7 @@ class UiSmoke(unittest.TestCase):
         f = UserForm(); self.assertEqual(f.function(), "AGENT DE BUREAU")
         f.func.setCurrentIndex(f.func.findData("PÉDIATRE")); self.assertTrue(f.services() == ["PED"])
         f.func.setCurrentIndex(f.func.findData("INFERMIER")); self.assertEqual((f.services(), f.space.text()), ([], "Soins & Triage"))
-        self.assertEqual(sum(1 for i in range(f.func.count()) if f.func.itemData(i)), 20)         # les 20 fonctions officielles
+        self.assertEqual(sum(1 for i in range(f.func.count()) if f.func.itemData(i)), 22)         # les 22 fonctions officielles
 
     def test_all_spaces_and_end_to_end_flow_with_soins_handover_and_coordinators(self):
         from PyQt6.QtCore import Qt

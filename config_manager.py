@@ -52,6 +52,7 @@ DEFAULTS = {
     "auto_update_check": True,
     "github_repo": "",            # vide = GITHUB_REPO de version.py
     "theme": "dark",
+    "screen_format": "auto",       # auto | 4:3 | 16:9
     "pin_salt": "",
     "pin_hash": "",
 }

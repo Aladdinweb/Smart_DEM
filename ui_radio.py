@@ -96,6 +96,8 @@ class RadioWindow(BaseWindow):
         super().__init__(cfg, db)
         self.current, self._known, self._awaiting, self._pending = None, None, [], []
         b = QPushButton("➕ Inscription directe"); b.clicked.connect(self.direct); self.header_extra.addWidget(b)
+        for label, fn in (("📅 Rendez-vous", self.open_appointments), ("📝 Fiches et formulaires", self.fiches)):
+            b = QPushButton(label); b.clicked.connect(fn); self.header_extra.addWidget(b)
         if cfg.get("tv_screen"):
             b = QPushButton("📺 Ouvrir l'écran TV"); b.clicked.connect(lambda *_: open_tv(self.cfg)); self.header_extra.addWidget(b)
         body = QHBoxLayout(); self.content.addLayout(body, 1)
@@ -255,6 +257,10 @@ class RadioWindow(BaseWindow):
         if 0 <= r < len(self._awaiting):
             self.db.radio_validate(self._awaiting[r]["id"], "DONE", "", self.user["id"])
             self.refresh()
+
+    def fiches(self, *_):
+        c = self.current
+        self.open_documents(self.db.get(c["admission_id"]) if c and c.get("admission_id") else None, "RAD")
 
     @guard
     def direct(self, *_):

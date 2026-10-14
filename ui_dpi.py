@@ -22,6 +22,17 @@ def _fmt(ts):
         return ts or ""
 
 
+def _vitals_text(v):
+    parts = []
+    if v.get("sys") and v.get("dia"):
+        parts.append(f"TA {v['sys']}/{v['dia']} {v.get('tension_unit') or ''}".strip())
+    if v.get("glyc"):
+        parts.append(f"Glycémie {v['glyc']} {v.get('glyc_unit') or ''}".strip())
+    if v.get("temp"):
+        parts.append(f"T° {v['temp']}")
+    return " · ".join(parts) or "—"
+
+
 class ResultViewer(QDialog):
     """Affiche un cliché / compte rendu / résultat ; impression locale et enregistrement possibles."""
     def __init__(self, db, user_id, result_id, cfg=None, context="", parent=None):
@@ -121,14 +132,16 @@ class PatientSearchDialog(QDialog):
             a = v["admission"]
             svc = SERVICE_BY_CODE.get(a["service_code"], {"icon": "", "name": a["service_code"]})
             node = QTreeWidgetItem([f"{_fmt(a['created_at'])} — {svc['icon']} {svc['name']} ({a['ticket_label']})", ""])
-            if rec["level"] == "medecin":
+            if v.get("restricted"):
+                QTreeWidgetItem(node, ["🔒 Contenu réservé aux médecins (psychologie)", ""])
+            elif rec["level"] in ("medecin", "soins"):
                 shown = False
                 for c in v["consultations"]:
                     if mine and c["doctor_user_id"] != self.user["id"]:
                         continue
                     shown = True
                     n = QTreeWidgetItem(node, [f"🩺 Consultation — Dr {c['doc_last'] or ''} {c['doc_first'] or ''}", c.get("outcome") or "en cours"])
-                    for lab, val in (("Diagnostic", c.get("diagnosis")), ("Observations", c.get("notes"))):
+                    for lab, val in (("Diagnostic", c.get("diagnosis")), ("Observations", c.get("notes") if rec["level"] == "medecin" else "")):
                         if val:
                             QTreeWidgetItem(n, [f"{lab} : {val}", ""])
                 for rx in v["prescriptions"]:
@@ -148,15 +161,24 @@ class PatientSearchDialog(QDialog):
                     n = QTreeWidgetItem(node, [f"🩻 {r_['exam_type'] or 'Radiologie'} {r_['region'] or ''} {r_['side'] or ''} ({r_['ticket_label']})",
                                                RADIO_STATUS.get(r_["status"], r_["status"])])
                     self._results(n, "radio", r_["id"], r_.get("n_results"))
+                for vt in v.get("vitals") or []:
+                    QTreeWidgetItem(node, [f"🌡 Constantes — {_fmt(vt.get('recorded_at') or '')} : " + _vitals_text(vt), f"{vt.get('last_name') or ''} {vt.get('first_name') or ''}".strip()])
+                acts = v.get("acts") or []
+                if acts:
+                    an = QTreeWidgetItem(node, [f"🧾 Actes tracés ({len(acts)})", ""])
+                    for ac in acts:
+                        QTreeWidgetItem(an, [f"{_fmt(ac['at'])} — {ac['label']}", f"{ac['user_name']} ({ac.get('function') or ''}) · {ac.get('service_code') or ''}"])
                 if mine and not shown and not node.childCount():
                     continue
             self.tree.addTopLevelItem(node)
         self.tree.expandToDepth(0)
-        if rec["level"] != "medecin":
-            self.hint.setText("Accès limité (identité et passages) : le contenu médical est réservé aux médecins.")
+        if rec["level"] == "soins":
+            self.hint.setText("Accès paramédical : les observations libres des médecins et la psychologie ne sont pas affichées. Votre consultation est tracée.")
+        elif rec["level"] != "medecin":
+            self.hint.setText("Accès limité (identité et passages) : le contenu médical est réservé au personnel médical et paramédical autorisé.")
 
     def _results(self, parent, kind, rid, n):
-        if not n:
+        if not n or self.user["role"] != "medecin":          # pièces jointes : médecins seulement
             return
         for res in self.db.list_results(kind, rid, self.user["id"]):
             it = QTreeWidgetItem(parent, [f"📎 {res['filename'] or 'Compte rendu'} — {_fmt(res['created_at'])}", ""])

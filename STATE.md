@@ -4,12 +4,22 @@
 
 | | |
 |---|---|
-| **Version courante** | `1.3.0` (source unique : `version.py`) — publiées : `1.0.0`, `1.1.0`, `1.2.0` (+ `1.2.1` correctif) |
-| **Statut** | Code complet de la v1.3.0. **45 tests automatiques** (base de données, migrations v1→v4, rôles/fonctions, soins, coordinateurs, relève de garde, brouillons, TV : voix/alertes/appariement, chiffrement, JWT, TLS, Hub, packaging, SemVer). **Non validé sur matériel réel** : l'interface complète, l'impression, les TV, les lecteurs de codes. La CI compile puis lance **l'exécutable lui-même** (`--selftest`) : chaque espace doit s'ouvrir. |
+| **Version courante** | `1.4.0` (source unique : `version.py`) — publiées : `1.0.0`, `1.1.0`, `1.2.0` (+ `1.2.1`), `1.3.0` |
+| **Statut** | Code complet de la v1.4.0 (**à tagger après validation de la CI**). **67 tests automatiques** (base de données, migrations v1→v5, rôles/fonctions, soins, coordinateurs, relève de garde, brouillons, TV, chiffrement, JWT, TLS, Hub, packaging, SemVer, **messagerie, modèles, rendez-vous + QR, DPI paramédical, traçabilité des actes, interface 4:3/16:9**). **Non validé sur matériel réel** : l'interface complète, l'impression, les TV, les lecteurs de codes. La CI compile puis lance **l'exécutable lui-même** (`--selftest`) : chaque espace doit s'ouvrir. |
 | **Dépôt** | https://github.com/Aladdinweb/Smart_DEM |
 | **Cible** | Windows 10/11 — PyQt6 + SQLite, `Smart_DEM_Setup.exe` |
 
-## 0. v1.3.0 face au cahier `NEXT_FEATURES.md`
+## 0. v1.4.0 — les 5 lots de la feuille de route
+
+| Lot | État v1.4.0 |
+|---|---|
+| **1. Signalements & convocations internes** (poste à poste, bidirectionnel) | ✅ `ui_messages.py` + tables `messages` / `message_reads`. Coordinateurs (COORDINATEUR DES MÉDECINS, COORDINATEUR DE PARAMÉDICAL, RESPONSABLE URGENCES, **SURVEILLANT**) → **convocation** d'un ou plusieurs agents ; agents → **signalement** à un groupe de coordination ou à un coordinateur ; **réponse** et **accusé de réception** (« Je me présente ») visibles par l'émetteur. Chaque message : horodatage, nom + fonction de l'agent, **service émetteur** (espace · services · poste), motif, détail, urgence. Affichage **sur les PC uniquement** (badge ✉, bandeau, fenêtre pour convocation / urgent) — **jamais sur la TV** (testé). Motif et détail chiffrés. Interrogation toutes les 5 s |
+| **2. Modèles de documents par rôle** | ✅ bouton **« 📄 Modèles »** (en-tête) = **Import** depuis le PC (txt, html, docx, png, jpg, pdf), stockés sur le Hub : partagés par tous les postes du même rôle. Catalogue `doc_models.py` : médecins (arrêt de travail, bonne santé, bilan/analyses, ECG, ordonnances types, certificat autre), **opticien** (fiche ophtalmo, ordonnance de lunettes), **chirurgien-dentiste** (fiche dentaire), **laboratoire** (fiche de prélèvement, formulaire), **radiologie** (fiche d'examen, formulaire). Établissement : « 📝 Documents et certificats » (médecin), « 📝 Fiches et formulaires » (labo, radio) ; champs `{{nom}}` `{{prenom}}` `{{age}}` `{{date}}` `{{medecin}}`… remplis ; image/PDF = trame en surimpression ; **modèle standard** fourni tant que rien n'est importé. Rôle **CHIRURGIEN-DENTISTE** ajouté (22 fonctions) |
+| **3. Rendez-vous tous services + ticket QR** | ✅ `ui_appointments.py` : calendrier, n° de passage par service et par jour, ticket imprimé (identité, service, date/heure, n° de passage, **QR signé** `SDEMR1…`). **Arrivée le jour J** : scan du QR (ou bouton) → passage créé et inséré **dans la file du service à la place de l'heure du rendez-vous** (`admissions.sort_ts`), sans ressaisie. Accueil : tous les services ; labo / radio / médecin : leur service (le labo garde son onglet) ; pas de rendez-vous pour Urgences ni Salle de soins |
+| **4. Interface adaptative & logo** | ✅ `ui_layout.py` : profil d'écran (4:3, 16:10, 16:9, réglable dans Paramètres › « Format d'écran »), polices/marges compactes, **en-tête sur deux lignes** (boutons du poste qui passent à la ligne), aucune fenêtre ne dépasse l'écran (1024×768 testé). Logo : l'en-tête et **toutes** les impressions (tickets, ordonnances, documents, ticket RDV) affichent `assets/logo_ministere.png` s'il existe — **⚠ le fichier officiel reste à fournir** (la CI affiche un avertissement tant qu'il manque) |
+| **5. DPI paramédical & traçabilité** | ✅ personnel paramédical **autorisé** (`functions.DPI_CLINICAL_PARAMED` : ISP, INFERMIER, SAGE FEMME, COORDINATEUR DE PARAMÉDICAL, SURVEILLANT) : historique, constantes, ordonnances, analyses, imagerie, diagnostic — **sans les observations libres des médecins ni la psychologie** (réservée aux médecins) ni les pièces jointes. Autres paramédicaux : identité + passages. Journal **`acts`** (ajout seul, jamais modifié) alimenté **automatiquement** : consultation (début/fin), ordonnance, analyses, imagerie, constantes, orientation, délivrance, rendez-vous, documents établis + **actes de soins** saisis en salle de soins ; chaque ligne = auteur (nom, fonction), service, heure ; détails chiffrés. Chaque consultation du DPI reste tracée (`audit_log`, avec la fonction) |
+
+## 0 bis. Rappel v1.3.0 face au cahier `NEXT_FEATURES.md`
 
 | Exigence | État v1.3.0 |
 |---|---|
@@ -24,7 +34,7 @@
 | **Pharmacie réseau local** + « INDISPONIBLE ACTUELLEMENT » pour la synchro cloud | ✅ |
 | *« Chaque rôle lié à son interface propre »* | ✅ nouvel espace **Soins & Triage** (constantes vitales tension / glycémie / température, orientation vers le triage médical) pour ISP, infirmier, sage-femme, ATS, paramédical, assistante médicale |
 
-**Pas encore dans la 1.3.0** (cahier `NEXT_FEATURES.md` §4 et §9) : rendez-vous généralisés à tous les services avec **ticket de rendez-vous imprimé (QR)** et réinsertion automatique dans la file ; rendez-vous de consultation et de radiologie (seul le laboratoire en a) ; interface adaptative 4:3 / 16:9 ; DPI pour le personnel paramédical.
+*(Les points restants de la 1.3.0 — rendez-vous généralisés + QR, interface 4:3/16:9, DPI paramédical — sont livrés en 1.4.0, voir §0.)*
 
 ## 1. Fonctions officielles → espaces (RBAC)
 
@@ -33,10 +43,10 @@ Connexion par PIN (4 chiffres) ; l'application ouvre **uniquement l'espace de la
 | Fonctions | Espace |
 |---|---|
 | AGENT DE BUREAU, ADMINISTRATION, ASSISTANT SOCIAL | **Accueil** (enregistrement, tickets, pilotage TV, DPI limité) |
-| MÉDECIN, PÉDIATRE, PSYCHOLOGUE, OPTICIEN, RESPONSABLE URGENCES | **Consultation** (file filtrée sur ses services — dentaire, diabétologie, nutrition… se cochent sur la fonction MÉDECIN) ; RESPONSABLE URGENCES peut en plus diffuser des alertes TV |
+| MÉDECIN, PÉDIATRE, **CHIRURGIEN-DENTISTE**, PSYCHOLOGUE, OPTICIEN, RESPONSABLE URGENCES | **Consultation** (file filtrée sur ses services — dentaire, diabétologie, nutrition… se cochent sur la fonction MÉDECIN) ; RESPONSABLE URGENCES peut en plus diffuser des alertes TV |
 | COORDINATEUR DES MÉDECINS | **Coordination des médecins** (vue globale des services de consultation) |
 | ISP, INFERMIER, SAGE FEMME, ATS, PARAMÉDICAL, ASSISTANTE MEDICAL | **Soins & Triage** |
-| COORDINATEUR DE PARAMÉDICAL | **Coordination paramédicale** (vue globale des soins) |
+| COORDINATEUR DE PARAMÉDICAL, **SURVEILLANT** | **Coordination paramédicale** (vue globale des soins ; DPI paramédical ; messagerie) |
 | LABORANTIN, PRÉLÈVEMENT | **Laboratoire** (seul LABORANTIN saisit / valide les résultats ; PRÉLÈVEMENT : tickets, rendez-vous, prélèvements) |
 | MANIPULATEUR | **Radiologie** |
 | PHARMACIEN | **Pharmacie** (LAN ; synchro externe : « INDISPONIBLE ACTUELLEMENT ») |
@@ -51,12 +61,13 @@ Voir l'historique §9 : en-tête officiel (le **fichier du logo reste à fournir
 | Module | Rôle |
 |---|---|
 | `main.py` | Contrôleur : connexion → espace du rôle → déconnexion ; sauvegardes, rapport DSP, sync, résilience |
-| `database.py` · `schema.sql` | Schéma v3, migrations idempotentes, RBAC côté base, chiffrement transparent, DPI, RDV, TV, DSP, outbox |
+| `database.py` · `schema.sql` | Schéma v5, migrations idempotentes, RBAC côté base, chiffrement transparent, DPI, RDV, TV, DSP, outbox |
 | `hub_server.py` · `remote_db.py` · `auth.py` · `tls.py` | Hub (RPC, JWT, HTTPS/TLS 1.3 épinglé, WebSocket TV par écran) |
 | `ui_common.py` · `ui_login.py` · `ui_sigeditor.py` | Fenêtre de base, connexion/utilisateurs/profil, éditeur de griffe |
 | `ui_reception.py` · `ui_doctor.py` · `ui_radio.py` · `ui_lab.py` · `ui_pharmacy.py` · `ui_soins.py` · `ui_coord.py` | Les espaces (8 rôles : accueil, consultation, radiologie, laboratoire, pharmacie, soins, 2 coordinations) |
 | `functions.py` · `userdata.py` · `ui_tv.py` | Fonctions officielles, dossiers locaux des agents, pilotage des écrans TV (voix, alertes, appariement) |
 | `ui_dpi.py` · `ui_settings.py` · `ui_setup.py` | DPI et résultats, paramètres, assistant |
+| `ui_messages.py` · `ui_templates.py` · `ui_appointments.py` · `ui_layout.py` · `doc_models.py` | **v1.4.0** : messagerie interne, modèles / certificats, rendez-vous + QR, interface 4:3/16:9, catalogue des modèles |
 | `branding.py` · `documents.py` · `printer.py` · `templates.py` · `barcode.py` · `qr.py` | En-tête officiel, documents A4, impression silencieuse + surimpression, codes |
 | `crypto.py` · `imgproc.py` · `fhir.py` · `sync.py` · `reports.py` | AES-256-GCM, détourage, FHIR, synchronisation, DSP |
 | `updater.py` · `github_updater.py` | Mises à jour (la copie attend désormais la **fermeture réelle** de l'application) |
@@ -75,17 +86,20 @@ Voir l'historique §9 : en-tête officiel (le **fichier du logo reste à fournir
 - Mettre à jour le **Hub avant** les postes clients. Mise à jour automatique : fonctionne avec le script corrigé (1.2.1) ; à défaut, `Smart_DEM_Setup.exe` (données conservées).
 - Les TV déjà configurées par `?screen=ID` continuent de fonctionner ; sans paramètre, la TV affiche désormais un code d'appariement.
 
+## 5 bis. Mise à jour vers la 1.4.0 (à lire)
+- **Migration automatique v4 → v5** (additive, sauvegarde préalable) : nouvelles tables `messages`, `message_reads`, `doc_templates`, `acts` ; colonnes `appointments.{service_code, number, token, doctor_user_id, admission_id, checkin_at, gender}` et `admissions.{sort_ts, appt_id}`. Les **anciens rendez-vous** deviennent des rendez-vous de **LABORATOIRE** ; ils n'ont ni n° de passage, ni QR, ni sexe : à l'arrivée, le poste demande le sexe et l'année de naissance. Le journal des actes ne contient **pas** l'historique d'avant la 1.4.0.
+- Mettre à jour le **Hub avant** les postes clients (nouvelles méthodes RPC). Créer un compte **SURVEILLANT** (Gérer les utilisateurs) pour que les messages « Surveillant » aient un destinataire.
+- **Hypothèses à valider sur le terrain** : « Surveillant » = fonction rattachée à la coordination paramédicale ; paramédicaux autorisés au DPI = ISP, INFERMIER, SAGE FEMME, COORDINATEUR DE PARAMÉDICAL, SURVEILLANT (modifiable en une ligne dans `functions.py`).
+
 ## 6. Gestion des versions (SemVer `MAJEUR.MINEUR.CORRECTIF`)
 CORRECTIF = correction ; MINEUR = fonctionnalités compatibles (migration de schéma additive permise) ; MAJEUR = incompatible (Hub et clients de MAJEUR différent refusent de dialoguer). Pré-versions `X.Y.Z-rc.N` = *pre-release* GitHub.
 ### Procédure de release
 1. `version.py` + historique (§9). 2. `git add -A && git commit && git push`. 3. Test à blanc : Actions › *Run workflow*. 4. `git tag -a vX.Y.Z -m "…" && git push origin vX.Y.Z`. 5. Le workflow vérifie tag = `v`+`version.py`, lance les tests, compile (icône, assets), publie `Smart_DEM_Setup.exe`, `Smart_DEM_update.zip`, `.sha256`.
 
 ## 7. Feuille de route
-### v1.3.0 — ce document (§0) ; reste : logo officiel, validation terrain
-### v1.4.0 — prochain lot
-- [ ] Rendez-vous **généralisés** (consultations, dentaire, radiologie, laboratoire) : ticket de rendez-vous imprimé (identité, spécialité, date/heure, n° de passage, QR), réinsertion automatique dans la file le jour J
-- [ ] Interface adaptative (4:3, 16:9, portables) sans défilement complexe
-- [ ] DPI pour le personnel paramédical (constantes, passages) ; fonction « CHIRURGIEN-DENTISTE / DIABÉTOLOGUE » explicite si souhaitée (une ligne dans `functions.py`)
+### v1.4.0 — ce document (§0) ; reste : **fournir `assets/logo_ministere.png`**, validation sur matériel réel (impression des tickets QR, lecteur de QR, écrans 4:3 réels), relecture des textes des certificats standard par un médecin
+- [x] Messagerie interne · [x] Modèles de documents par rôle · [x] Rendez-vous + QR · [x] 4:3 / 16:9 · [x] DPI paramédical + traçabilité
+- [ ] Diabétologue / nutritionniste comme fonctions explicites si souhaité (une ligne dans `functions.py`)
 ### v2.0.0 — propositions
 - [ ] Intégration CHIFA/CNAS/CASNOS et serveur régional/national (conditionnée aux spécifications officielles) ; profils FHIR nationaux ; signature électronique légale
 - [ ] Sauvegarde chiffrée avec export de clé protégé par phrase secrète ; clé liée au compte Windows (DPAPI)
@@ -93,9 +107,12 @@ CORRECTIF = correction ; MINEUR = fonctionnalités compatibles (migration de sch
 - [ ] Audit de sécurité indépendant ; interface FR/AR (RTL) ; signature de code de l'exécutable
 
 ## 8. Limites connues
-Voix de la TV : celle du navigateur du PC de la TV (une voix féminine française est cherchée, sinon la première voix française) ; le signal sonore est toujours émis. Appariement : la TV doit pouvoir joindre le PC Hub par son nom (`NOM-DU-PC`, selon la résolution de noms du réseau) ou son IP. `activity.log` ne retrace que les actions faites sur le PC concerné. Vues des coordinateurs : files de leur périmètre (consultations ou soins), pas les files radiologie / laboratoire. Données de santé en clair dans les archives locales ; HTTP simple sans TLS tant que l'option n'est pas activée ; PIN à 4 chiffres (protège l'usage, pas les fichiers) ; lecteur de QR/code-barres USB en mode clavier (vérifier la disposition AZERTY) ; griffe numérique sans valeur de signature légale ; dictionnaire de médicaments = **liste de départ + import de la nomenclature officielle** (fichier JSON/CSV à fournir : non inclus) ; le Hub est un point unique ; DPI : un même patient est reconnu par N° d'identification ou par nom + sexe + année de naissance (homonymes possibles : vérifier) ; exécutable non signé (SmartScreen) ; dépôt public requis pour la mise à jour GitHub.
+v1.4.0 : messages et convocations **interrogés toutes les 5 s** (pas de poussée instantanée) et conservés sur le Hub sans purge automatique ; ne mettre aucune information médicale nominative dans un message ; modèles **DOCX = texte seul** (mise en forme Word non conservée), modèles PDF/image = trame (PDF : nécessite QtPdf, sinon modèle standard) ; le journal des actes ne remonte pas avant la 1.4.0 ; le logo officiel n'est **pas** fourni ; l'impression des tickets QR et la lecture au lecteur USB n'ont pas été essayées sur matériel réel ; textes des certificats standard = trames génériques à faire relire par un médecin. Voix de la TV : celle du navigateur du PC de la TV (une voix féminine française est cherchée, sinon la première voix française) ; le signal sonore est toujours émis. Appariement : la TV doit pouvoir joindre le PC Hub par son nom (`NOM-DU-PC`, selon la résolution de noms du réseau) ou son IP. `activity.log` ne retrace que les actions faites sur le PC concerné. Vues des coordinateurs : files de leur périmètre (consultations ou soins), pas les files radiologie / laboratoire. Données de santé en clair dans les archives locales ; HTTP simple sans TLS tant que l'option n'est pas activée ; PIN à 4 chiffres (protège l'usage, pas les fichiers) ; lecteur de QR/code-barres USB en mode clavier (vérifier la disposition AZERTY) ; griffe numérique sans valeur de signature légale ; dictionnaire de médicaments = **liste de départ + import de la nomenclature officielle** (fichier JSON/CSV à fournir : non inclus) ; le Hub est un point unique ; DPI : un même patient est reconnu par N° d'identification ou par nom + sexe + année de naissance (homonymes possibles : vérifier) ; exécutable non signé (SmartScreen) ; dépôt public requis pour la mise à jour GitHub.
 
 ## 9. Historique des modifications
+### [1.4.0] — en préparation
+**Ajouté** : messagerie interne poste à poste (signalements, convocations, accusés, réponses ; jamais sur la TV) ; import de modèles de documents par rôle (« Modèles ») et établissement de certificats / fiches (DOCX = texte seul) ; fonctions **CHIRURGIEN-DENTISTE** et **SURVEILLANT** (22 fonctions) ; rendez-vous de tous les services avec ticket QR et insertion automatique dans la file à l'arrivée ; interface adaptative 4:3 / 16:9 (+ réglage « Format d'écran ») ; DPI pour le paramédical autorisé ; journal de traçabilité des actes (`acts`) + saisie des actes de soins ; avertissement CI si le logo officiel manque.
+**Modifié** : schéma v5 (migration automatique) ; la file est triée par heure de rendez-vous pour les patients arrivés sur rendez-vous ; en-tête sur deux lignes en 4:3 ; le médecin peut créer des rendez-vous de ses services (auparavant : laboratoire uniquement) ; onglet Rendez-vous du laboratoire remplacé par le panneau commun.
 ### [1.3.0] — en préparation
 **Ajouté** : 20 fonctions officielles (liste fermée) liées aux espaces ; espace **Soins & Triage** (constantes vitales, orientation) ; vues des **coordinateurs** (globale, réorientation, alertes) ; **relève de garde** avec réservation du patient, brouillons chiffrés enregistrés en continu et reprise en un clic ; dossiers locaux `data/users/[SLUG]/` ; TV : appariement par code court, voix féminine, bouton 📢 de répétition, 🔊 voix on/off, bandeaux d'alerte/urgence temporisés ; pharmacie : mode LAN et « INDISPONIBLE ACTUELLEMENT » pour la synchronisation externe ; permissions du laboratoire par fonction (LABORANTIN / PRÉLÈVEMENT).
 **Modifié** : schéma v4 (migration automatique) ; `create_user` / `update_user` par fonction ; titre « Dr » selon la fonction ; bouton « Rappeler » = « 📢 Rappeler / répéter l'appel ».

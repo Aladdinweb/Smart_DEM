@@ -1,55 +1,18 @@
 """Poste Laboratoire (accueil / secrétariat + technicien) : tickets, file d'appel, demandes des médecins, résultats, rendez-vous (calendrier)."""
 from datetime import datetime
 
-from PyQt6.QtCore import QDate, QTime, Qt, QTimer
-from PyQt6.QtGui import QColor, QKeySequence, QShortcut, QTextCharFormat
-from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCalendarWidget, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFormLayout,
-                             QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QTabWidget, QTableWidget,
-                             QTableWidgetItem, QTextEdit, QTimeEdit, QVBoxLayout, QWidget)
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QColor, QKeySequence, QShortcut
+from PyQt6.QtWidgets import (QApplication, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTabWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from archive import archive_reception
 from database import FMT, age_from_row, display_name, parse_age_or_birth
 from printer import print_ticket
+from ui_appointments import AppointmentsPanel
 from ui_common import BaseWindow, guard, open_tv
 from ui_radio import SendResultDialog, _table
 
 STATUS = {"PLANNED": "📅 Prévu", "ARRIVED": "🚶 Arrivé", "DONE": "✅ Fait", "CANCELLED": "✖ Annulé"}
-
-
-class ApptDialog(QDialog):
-    def __init__(self, a=None, day=None, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Rendez-vous d'analyses")
-        f = QFormLayout(self)
-        self.last, self.first = QLineEdit(a["last_name"] if a else ""), QLineEdit(a["first_name"] if a else "")
-        self.year = QLineEdit(str(a["birth_year"] or "") if a else ""); self.year.setPlaceholderText("année de naissance (facultatif)")
-        self.phone, self.ident = QLineEdit(a["phone"] if a else ""), QLineEdit(a["ident"] if a else "")
-        self.date = QDateEdit(QDate.fromString(a["date"], "yyyy-MM-dd") if a else (day or QDate.currentDate())); self.date.setCalendarPopup(True)
-        self.time = QTimeEdit(QTime.fromString(a["time"], "HH:mm") if a else QTime(8, 0)); self.time.setDisplayFormat("HH:mm")
-        self.exam, self.notes = QLineEdit(a["exam"] if a else ""), QLineEdit(a["notes"] if a else "")
-        self.status = QComboBox()
-        for k, v in STATUS.items():
-            self.status.addItem(v, k)
-        if a:
-            self.status.setCurrentIndex(max(0, self.status.findData(a["status"])))
-        for lab, w in (("Nom", self.last), ("Prénom", self.first), ("Naissance", self.year), ("Téléphone", self.phone), ("N° d'identification", self.ident),
-                       ("Date", self.date), ("Heure", self.time), ("Analyses", self.exam), ("Notes", self.notes)):
-            f.addRow(lab + " :", w)
-        if a:
-            f.addRow("Statut :", self.status)
-        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        bb.accepted.connect(self._ok); bb.rejected.connect(self.reject); f.addRow(bb)
-
-    def _ok(self):
-        if len(self.last.text().strip()) < 2 or not self.first.text().strip():
-            QMessageBox.warning(self, "Rendez-vous", "Nom et prénom obligatoires."); return
-        self.accept()
-
-    def values(self):
-        y = self.year.text().strip()
-        return {"last_name": self.last.text(), "first_name": self.first.text(), "birth_year": int(y) if y.isdigit() else None,
-                "phone": self.phone.text(), "ident": self.ident.text(), "date": self.date.date().toString("yyyy-MM-dd"),
-                "time": self.time.time().toString("HH:mm"), "exam": self.exam.text(), "notes": self.notes.text(), "status": self.status.currentData()}
 
 
 class LabWindow(BaseWindow):
@@ -59,6 +22,7 @@ class LabWindow(BaseWindow):
         self._reqs, self._appts, self._calls = [], [], []
         if cfg.get("tv_screen"):
             b = QPushButton("📺 Ouvrir l'écran TV"); b.clicked.connect(lambda *_: open_tv(self.cfg)); self.header_extra.addWidget(b)
+        f = QPushButton("📝 Fiches et formulaires"); f.clicked.connect(self.fiches); self.header_extra.addWidget(f)
         tabs = QTabWidget(); self.content.addWidget(tabs, 1)
         tabs.addTab(self._tab_queue(), "🧪 File & demandes")
         tabs.addTab(self._tab_tickets(), "🎟 Tickets")
@@ -68,7 +32,8 @@ class LabWindow(BaseWindow):
 
     def on_login(self):
         self._seen = None
-        self.refresh(); self.refresh_appts()
+        self.appts_panel.set_user(self.user)
+        self.refresh()
 
     # ---------------- file d'attente & demandes électroniques ----------------
     def _tab_queue(self):
@@ -219,94 +184,14 @@ class LabWindow(BaseWindow):
 
     # ---------------- rendez-vous : calendrier + liste globale ----------------
     def _tab_appts(self):
-        w = QWidget(); h = QHBoxLayout(w)
-        left = QVBoxLayout()
-        self.cal = QCalendarWidget(); self.cal.setGridVisible(True)
-        self.cal.selectionChanged.connect(self.refresh_appts); self.cal.currentPageChanged.connect(lambda *_: self._mark_days())
-        self.day_table = _table(["Heure", "Patient", "Analyses", "Statut"])
-        left.addWidget(self.cal); left.addWidget(QLabel("Rendez-vous du jour sélectionné :")); left.addWidget(self.day_table, 1)
-        h.addLayout(left, 1)
-        right = QVBoxLayout()
-        top = QHBoxLayout()
-        self.search = QLineEdit(); self.search.setPlaceholderText("Rechercher (nom, prénom, N° d'identification, téléphone)…")
-        self.search.textChanged.connect(self.refresh_appts)
-        self.range = QComboBox(); self.range.addItems(["Ce mois", "30 prochains jours", "Tous (±1 an)"]); self.range.currentIndexChanged.connect(self.refresh_appts)
-        top.addWidget(self.search, 1); top.addWidget(self.range)
-        self.all_table = _table(["Date", "Heure", "Patient", "Analyses", "Statut", "Tél."])
-        right.addLayout(top); right.addWidget(QLabel("Liste globale des rendez-vous :")); right.addWidget(self.all_table, 1)
-        row = QHBoxLayout()
-        for label, fn in (("➕ Nouveau", self.new_appt), ("✏️ Modifier", self.edit_appt), ("🗑 Supprimer", self.del_appt), ("🎟 Arrivé → ticket", self.appt_to_ticket)):
-            b = QPushButton(label); b.clicked.connect(fn); row.addWidget(b)
-        right.addLayout(row); h.addLayout(right, 2)
-        return w
+        self.appts_panel = AppointmentsPanel(self.db, self.cfg, self)
+        self.appts_panel.changed.connect(self.refresh)
+        return self.appts_panel
 
-    def _sel_appt(self):
-        for table in (self.all_table, self.day_table):
-            r = table.currentRow()
-            rows = self._appts if table is self.all_table else self._day
-            if 0 <= r < len(rows):
-                return rows[r]
-        return None
+    def fiches(self, *_):
+        c = self.current
+        self.open_documents(self.db.get(c["admission_id"]) if c and c.get("admission_id") else None, "BIO")
 
-    @guard
     def refresh_appts(self, *_):
-        if not self.user:
-            return
-        d = self.cal.selectedDate()
-        first = QDate(d.year(), d.month(), 1)
-        lo, hi = {0: (first, first.addMonths(1).addDays(-1)), 1: (QDate.currentDate(), QDate.currentDate().addDays(30)),
-                  2: (QDate.currentDate().addYears(-1), QDate.currentDate().addYears(1))}[self.range.currentIndex()]
-        f = lambda q: q.toString("yyyy-MM-dd")
-        self._appts = self.db.list_appointments(f(lo), f(hi), self.search.text(), self.user["id"])
-        self._day = self.db.list_appointments(f(d), f(d), "", self.user["id"])
-        for table, rows, cols in ((self.all_table, self._appts, lambda a: (a["date"], a["time"], f"{a['last_name']} {a['first_name']}", a["exam"], STATUS[a["status"]], a["phone"])),
-                                  (self.day_table, self._day, lambda a: (a["time"], f"{a['last_name']} {a['first_name']}", a["exam"], STATUS[a["status"]]))):
-            table.setRowCount(len(rows))
-            for i, a in enumerate(rows):
-                for j, t in enumerate(cols(a)):
-                    table.setItem(i, j, QTableWidgetItem(t or ""))
-        self._mark_days()
-
-    def _mark_days(self):
-        self.cal.setDateTextFormat(QDate(), QTextCharFormat())
-        fmt = QTextCharFormat(); fmt.setBackground(QColor("#2f80ed")); fmt.setForeground(QColor("white"))
-        month = f"{self.cal.yearShown()}-{self.cal.monthShown():02d}"
-        try:
-            for day in self.db.appointment_days(month, self.user["id"]):
-                self.cal.setDateTextFormat(QDate.fromString(day, "yyyy-MM-dd"), fmt)
-        except (ConnectionError, PermissionError):
-            pass
-
-    @guard
-    def new_appt(self, *_):
-        d = ApptDialog(None, self.cal.selectedDate(), self)
-        if d.exec():
-            self.db.create_appointment(d.values(), self.user["id"]); self.refresh_appts()
-
-    @guard
-    def edit_appt(self, *_):
-        a = self._sel_appt()
-        if not a:
-            return self.show_banner("Sélectionnez un rendez-vous.", "error")
-        d = ApptDialog(a, None, self)
-        if d.exec():
-            self.db.update_appointment(a["id"], d.values(), self.user["id"]); self.refresh_appts()
-
-    @guard
-    def del_appt(self, *_):
-        a = self._sel_appt()
-        if a and QMessageBox.question(self, "Supprimer", f"Supprimer le rendez-vous de {a['last_name']} {a['first_name']} ?") == QMessageBox.StandardButton.Yes:
-            self.db.delete_appointment(a["id"], self.user["id"]); self.refresh_appts()
-
-    @guard
-    def appt_to_ticket(self, *_):
-        a = self._sel_appt()
-        if not a:
-            return self.show_banner("Sélectionnez un rendez-vous.", "error")
-        year = a["birth_year"] or datetime.now().year - 30
-        row = self.db.add_admission({"last_name": a["last_name"], "first_name": a["first_name"], "parsed": {"birth_date": None, "birth_year": year},
-                                     "gender": "H", "service_code": "LAB", "ident": a["ident"], "user_id": self.user["id"]}, self.station)
-        self.db.update_appointment(a["id"], {**a, "status": "ARRIVED"}, self.user["id"])
-        print_ticket(self.cfg, row)
-        self.show_banner(f"Patient arrivé — ticket {row['ticket_label']} (vérifiez le genre sur la fiche si besoin).")
-        self.refresh(); self.refresh_appts()
+        if self.user:
+            self.appts_panel.refresh()

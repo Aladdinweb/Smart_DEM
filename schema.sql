@@ -5,7 +5,7 @@
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '5');
 
 -- ===== Utilisateurs (connexion par PIN à 4 chiffres) =====
 CREATE TABLE IF NOT EXISTS users (
@@ -70,6 +70,8 @@ CREATE TABLE IF NOT EXISTS admissions (
     handover_note  TEXT,                          -- v4 : relève de garde (patient réservé pour un confrère)
     handover_from  INTEGER,
     handover_at    TEXT,
+    sort_ts        TEXT,                          -- v5 : ordre de file (heure du rendez-vous) ; NULL = created_at
+    appt_id        INTEGER,                       -- v5 : rendez-vous d'origine
     UNIQUE (shift_id, ticket_label)
 );
 CREATE INDEX IF NOT EXISTS idx_adm_shift   ON admissions(shift_id, created_at);
@@ -211,7 +213,14 @@ CREATE TABLE IF NOT EXISTS appointments (
     notes       TEXT,
     status      TEXT NOT NULL DEFAULT 'PLANNED' CHECK (status IN ('PLANNED','ARRIVED','DONE','CANCELLED')),
     created_at  TEXT NOT NULL,
-    created_by  INTEGER REFERENCES users(id)
+    created_by  INTEGER REFERENCES users(id),
+    service_code   TEXT,                           -- v5 : service concerné (tous services)
+    number         INTEGER,                        -- v5 : n° de passage du jour pour ce service
+    token          TEXT,                           -- v5 : jeton du QR code (signé)
+    doctor_user_id INTEGER,                        -- v5 : médecin / agent attendu (facultatif)
+    admission_id   INTEGER,                        -- v5 : passage créé à l'arrivée
+    checkin_at     TEXT,
+    gender         TEXT                            -- v5 : H / F (nécessaire pour créer le passage à l'arrivée)
 );
 CREATE INDEX IF NOT EXISTS idx_appt_date ON appointments(date, time);
 
@@ -258,3 +267,62 @@ CREATE TABLE IF NOT EXISTS audit_log (
     station      TEXT,
     at           TEXT NOT NULL
 );
+
+
+-- ===== v5 : messagerie interne poste à poste (jamais diffusée sur les écrans TV) =====
+CREATE TABLE IF NOT EXISTS messages (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind          TEXT NOT NULL CHECK (kind IN ('CONVOCATION','SIGNALEMENT','REPONSE')),
+    priority      TEXT NOT NULL DEFAULT 'NORMAL' CHECK (priority IN ('NORMAL','URGENT')),
+    created_at    TEXT NOT NULL,                    -- horodatage
+    from_user_id  INTEGER NOT NULL REFERENCES users(id),
+    from_name     TEXT NOT NULL,                    -- nom de l'agent émetteur (instantané)
+    from_function TEXT,
+    from_service  TEXT,                             -- service / espace émetteur
+    to_user_id    INTEGER REFERENCES users(id),     -- destinataire nominatif …
+    to_group      TEXT,                             -- … ou groupe de coordination
+    reason        TEXT NOT NULL,                    -- motif (chiffré)
+    body          TEXT,                             -- détail (chiffré)
+    reply_to      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_msg_to ON messages(to_user_id, id);
+CREATE INDEX IF NOT EXISTS idx_msg_group ON messages(to_group, id);
+CREATE INDEX IF NOT EXISTS idx_msg_from ON messages(from_user_id, id);
+CREATE TABLE IF NOT EXISTS message_reads (
+    message_id INTEGER NOT NULL REFERENCES messages(id),
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    read_at    TEXT,
+    ack_at     TEXT,                                -- accusé de réception (« Je me présente »)
+    PRIMARY KEY (message_id, user_id)
+);
+
+-- ===== v5 : modèles de documents importés par rôle =====
+CREATE TABLE IF NOT EXISTS doc_templates (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    role        TEXT NOT NULL,
+    kind        TEXT NOT NULL,                      -- clé du catalogue (doc_models.py)
+    title       TEXT NOT NULL,
+    filename    TEXT,
+    mime        TEXT,
+    content_b64 TEXT NOT NULL,
+    created_by  INTEGER REFERENCES users(id),
+    created_at  TEXT NOT NULL,
+    active      INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_doct_role ON doc_templates(role, kind);
+
+-- ===== v5 : journal de traçabilité des actes (ajout seul : jamais modifié ni supprimé) =====
+CREATE TABLE IF NOT EXISTS acts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    admission_id INTEGER NOT NULL REFERENCES admissions(id),
+    at           TEXT NOT NULL,
+    user_id      INTEGER NOT NULL REFERENCES users(id),
+    user_name    TEXT NOT NULL,                     -- instantané : nom + fonction de l'auteur
+    function     TEXT,
+    service_code TEXT,
+    act_type     TEXT NOT NULL,                     -- CONSULTATION, PRESCRIPTION, ANALYSES, RADIOLOGIE, CONSTANTES, SOIN, ORIENTATION, DOCUMENT, RDV…
+    label        TEXT NOT NULL,
+    ref_id       INTEGER,
+    act_json     TEXT                               -- détails (chiffrés)
+);
+CREATE INDEX IF NOT EXISTS idx_acts_adm ON acts(admission_id, at);

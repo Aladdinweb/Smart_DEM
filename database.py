@@ -1,17 +1,19 @@
 """Couche SQLite : utilisateurs (PIN), gardes, admissions, consultations, ordonnances sécurisées, radiologie,
 analyses, pharmacie. Toutes les méthodes publiques de RPC_METHODS sont aussi appelables à distance via le Hub."""
-import hashlib, hmac, json, os, re, secrets, sqlite3, threading, unicodedata, uuid
+import base64, hashlib, hmac, json, os, re, secrets, sqlite3, threading, unicodedata, uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
 from config_manager import resource_path
+import doc_models
 from crypto import Crypto
 from data_structures import CONSULT_SERVICES, SERVICE_BY_CODE
 from medical_data import DRUGS_SEED
 
 FMT = "%Y-%m-%d %H:%M:%S"
-SCHEMA_VERSION = 4
-from functions import ALERT_FUNCTIONS, DEFAULT_SERVICES, ROLE_OF, ROLES, default_function, match_function   # noqa: E402
+SCHEMA_VERSION = 5
+from functions import (ALERT_FUNCTIONS, DEFAULT_SERVICES, DPI_CLINICAL_PARAMED, MSG_COORDINATORS, MSG_GROUPS, ROLE_OF, ROLES, SPACE_LABELS,   # noqa: E402
+                       default_function, honorific, match_function)
 def _cols(c, table):
     return {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
 
@@ -54,7 +56,7 @@ def _m3(c):      # v2 -> v3 : identifiant patient, isolation multi-comptes, labo
         c.execute("ALTER TABLE users_new RENAME TO users")
 
 
-ENC_FIELDS = {"vitals_json", "data_json", "diagnosis", "notes", "items_json", "canonical", "clinical_info", "instructions", "result_note", "report_text", "data_b64", "payload"}
+ENC_FIELDS = {"vitals_json", "data_json", "diagnosis", "notes", "items_json", "canonical", "clinical_info", "instructions", "result_note", "report_text", "data_b64", "payload", "act_json", "reason", "body"}
 def _m4(c):      # v3 -> v4 : fonctions officielles, rôles soins / coordinateurs, relève de garde (vitals et drafts créées par schema.sql)
     for col in ("handover_note TEXT", "handover_from INTEGER", "handover_at TEXT"):
         _add_col(c, "admissions", col)
@@ -76,7 +78,15 @@ def _m4(c):      # v3 -> v4 : fonctions officielles, rôles soins / coordinateur
             c.execute("UPDATE users SET function=? WHERE id=?", (default_function(u["role"], services), u["id"]))
 
 
-MIGRATIONS = {2: _m2, 3: _m3, 4: _m4}
+def _m5(c):      # v4 -> v5 : messagerie, modèles de documents, journal des actes (tables créées par schema.sql), RDV tous services, file triée par RDV
+    for col in ("sort_ts TEXT", "appt_id INTEGER"):
+        _add_col(c, "admissions", col)
+    for col in ("service_code TEXT", "number INTEGER", "token TEXT", "doctor_user_id INTEGER", "admission_id INTEGER", "checkin_at TEXT", "gender TEXT"):
+        _add_col(c, "appointments", col)
+    c.execute("UPDATE appointments SET service_code='LAB' WHERE service_code IS NULL")     # les rendez-vous v1.3 étaient tous des rendez-vous de laboratoire
+
+
+MIGRATIONS = {2: _m2, 3: _m3, 4: _m4, 5: _m5}
 
 
 def now():
@@ -157,7 +167,9 @@ RPC_METHODS = (
     "record_vitals", "vitals_for_admission", "orient_patient", "coord_overview", "reassign_admission", "save_draft", "get_draft", "delete_draft",
     "handover_start", "handover_list", "take_over", "tv_voice", "tv_announce", "tv_announce_clear", "tv_pairs", "tv_pair", "tv_unpair",
     "tv_screens", "tv_set_screens", "create_appointment", "update_appointment", "delete_appointment", "list_appointments",
-    "appointment_days", "stats_report",
+    "appointment_days", "appointment_checkin", "message_recipients", "send_message", "inbox", "outbox", "messages_poll", "message_read", "message_ack",
+    "doc_template_kinds", "list_doc_templates", "get_doc_template", "import_doc_template", "delete_doc_template", "record_document_issued", "record_act",
+    "acts_for_admission", "stats_report",
 )
 
 
@@ -179,6 +191,9 @@ class Database:
             self.conn.executescript(f.read())
         self.conn.commit()
         self._migrate()
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_appt_svc ON appointments(service_code, date)")
+        self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_appt_token ON appointments(token) WHERE token IS NOT NULL")
+        self.conn.commit()
         self._ensure_key()
         self._seed_drugs()
         self._encrypt_legacy()
@@ -315,6 +330,17 @@ class Database:
         c.execute("INSERT INTO audit_log(admission_id,action,details,station,at) VALUES (?,?,?,?,?)",
                   (adm_id, action, json.dumps(details, ensure_ascii=False, default=str), station, now()))
 
+    def _act(self, c, adm_id, user_id, act_type, label, ref=None, detail=None, service=None):
+        """Journal de traçabilité (ajout seul) : qui (nom, fonction), où (service), quoi (acte, prescription…), quand. Dans la transaction en cours."""
+        u = c.execute("SELECT last_name, first_name, function, specialty FROM users WHERE id=?", (user_id,)).fetchone()
+        if service is None:
+            a = c.execute("SELECT service_code FROM admissions WHERE id=?", (adm_id,)).fetchone()
+            service = a["service_code"] if a else None
+        name = f"{honorific(u['function'])}{u['last_name']} {u['first_name']}".strip() if u else "?"
+        return c.execute("INSERT INTO acts(admission_id,at,user_id,user_name,function,service_code,act_type,label,ref_id,act_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  (adm_id, now(), user_id, name, u["function"] if u else None, service, act_type, label[:200], ref,
+                   self._enc(json.dumps(detail, ensure_ascii=False, default=str)) if detail else None)).lastrowid
+
     def _next_ticket(self, c, sid, svc):
         c.execute("INSERT OR IGNORE INTO counters(shift_id,service_code,last_number) VALUES (?,?,0)", (sid, svc["code"]))
         c.execute("UPDATE counters SET last_number=last_number+1 WHERE shift_id=? AND service_code=?", (sid, svc["code"]))
@@ -410,7 +436,8 @@ class Database:
             ("admissions", "created_by"), ("admissions", "called_user_id"), ("consultations", "doctor_user_id"),
             ("prescriptions", "doctor_user_id"), ("prescriptions", "dispensed_by"), ("radiology_requests", "doctor_user_id"),
             ("radiology_requests", "tech_user_id"), ("lab_requests", "doctor_user_id"), ("lab_requests", "tech_user_id"),
-            ("results", "user_id")))
+            ("results", "user_id"), ("messages", "from_user_id"), ("messages", "to_user_id"), ("message_reads", "user_id"),
+            ("acts", "user_id"), ("doc_templates", "created_by"), ("appointments", "created_by")))
         if used:
             raise ValueError("Ce compte a un historique (consultations, tickets, résultats…) : désactivez-le plutôt que de le supprimer.")
         with self._tx() as c:
@@ -572,7 +599,7 @@ class Database:
                    AND ABS(b.birth_year-a.birth_year)<=1 AND b.id!=a.id AND b.status!='CANCELLED'
                    AND b.id<a.id AND b.created_at>=datetime(a.created_at, ?)) AS recurrent
                 FROM admissions a WHERE a.status='WAITING' AND a.service_code IN ({ph})
-                ORDER BY CASE a.triage_level WHEN 'ROUGE' THEN 0 WHEN 'ORANGE' THEN 1 ELSE 2 END, a.created_at, a.id""",
+                ORDER BY CASE a.triage_level WHEN 'ROUGE' THEN 0 WHEN 'ORANGE' THEN 1 ELSE 2 END, COALESCE(a.sort_ts, a.created_at), a.id""",
             [f"-{int(revisit_hours)} hours"] + list(services))
 
     def current_called(self, station, user_id):
@@ -627,6 +654,7 @@ class Database:
                 cid = c.execute("INSERT INTO consultations(admission_id,doctor_user_id,station,started_at) VALUES (?,?,?,?)",
                                 (admission_id, user_id, station, now())).lastrowid
                 r = c.execute("SELECT * FROM consultations WHERE id=?", (cid,)).fetchone()
+                self._act(c, admission_id, user_id, "CONSULTATION", "Consultation commencée", cid)
             return dict(r)
 
     def close_consultation(self, cid, notes="", diagnosis="", user_id=None):
@@ -635,6 +663,7 @@ class Database:
             c.execute("UPDATE consultations SET ended_at=?, notes=?, diagnosis=?, outcome='CLOSED' WHERE id=?", (now(), self._enc(notes), self._enc(diagnosis), cid))
             c.execute("UPDATE admissions SET status='DONE', finished_at=COALESCE(finished_at,?) WHERE id=?", (now(), cons["admission_id"]))
             c.execute("DELETE FROM drafts WHERE admission_id=?", (cons["admission_id"],))
+            self._act(c, cons["admission_id"], user_id, "CONSULTATION", "Consultation clôturée", cid)
         d = self.consultation_dossier(cid)
         if self.sync_enabled:                                  # file de synchronisation hors-ligne (FHIR)
             from fhir import consultation_bundle
@@ -680,6 +709,7 @@ class Database:
                          canonical,content_hash,sig,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
                       (uid, consultation_id, adm["id"], user_id, self._enc(json.dumps(items, ensure_ascii=False)), self._enc(notes or ""),
                        self._enc(canonical), chash, self._sign(uid + chash)[:16], created))
+            self._act(c, adm["id"], user_id, "PRESCRIPTION", f"Ordonnance ({len(items)} médicament(s))", detail={"uuid": uid, "items": items})
         for i in items:
             self.add_drug(i["drug"])
         return self._rx(uid)
@@ -748,6 +778,7 @@ class Database:
         with self._tx() as c:
             c.execute("UPDATE prescriptions SET status='DISPENSED', dispensed_at=?, dispensed_by=? WHERE uuid=?", (now(), user_id, uid))
             c.execute("UPDATE transit_queue SET status='DONE' WHERE channel='pharmacie' AND ref_uuid=?", (uid,))
+            self._act(c, rx["admission_id"], user_id, "DELIVRANCE", "Ordonnance délivrée en pharmacie", service="PHA")
         return {"ok": True}
 
     # ---------- radiologie ----------
@@ -764,6 +795,7 @@ class Database:
                                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (uuid.uuid4().hex, "MEDECIN", consultation_id, cons["admission_id"], user_id, label, exam_type,
                              region, side, self._enc(clinical_info), self._enc(instructions), 1 if urgent else 0, "PENDING", now(), now_us())).lastrowid
+            self._act(c, cons["admission_id"], user_id, "RADIOLOGIE", f"Demande d'imagerie : {(exam_type or '').strip()} {(region or '').strip()}".strip(), rid)
         return self._radio_row(rid)
 
     def radio_queue(self, user_id=None):
@@ -805,6 +837,8 @@ class Database:
                       (status, now(), user_id, self._enc(note) if note else r["result_note"], request_id))
             if r["source"] == "RECEPTION" and r["admission_id"]:
                 c.execute("UPDATE admissions SET status='DONE', finished_at=COALESCE(finished_at,?) WHERE id=?", (now(), r["admission_id"]))
+            if r["admission_id"]:
+                self._act(c, r["admission_id"], user_id, "RADIOLOGIE", "Examen d'imagerie validé" if status == "DONE" else "Examen d'imagerie réalisé", request_id, service="RAD")
         return self._radio_row(request_id)
 
     def radio_requests_for_doctor(self, user_id, hours=24):
@@ -840,6 +874,7 @@ class Database:
                                created_at,status,ticket_label,urgent,queue_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                             (uid, consultation_id, cons["admission_id"], user_id, self._enc(json.dumps(items, ensure_ascii=False)),
                              self._enc(clinical_info or ""), now(), "PENDING", label, 1 if urgent else 0, now_us())).lastrowid
+            self._act(c, cons["admission_id"], user_id, "ANALYSES", f"Demande d'analyses ({len(items)})", lid, {"items": items})
         return self._labs("WHERE l.id=?", (lid,))[0]
 
     def lab_queue(self, user_id=None):
@@ -857,6 +892,9 @@ class Database:
         self._require_fn(user_id, ("LABORANTIN",))
         with self._tx() as c:
             c.execute("UPDATE lab_requests SET status='DONE', done_at=?, tech_user_id=? WHERE id=?", (now(), user_id, request_id))
+            lr = c.execute("SELECT admission_id FROM lab_requests WHERE id=?", (request_id,)).fetchone()
+            if lr and lr["admission_id"]:
+                self._act(c, lr["admission_id"], user_id, "ANALYSES", "Analyses validées", request_id, service="BIO")
         return self._labs("WHERE l.id=?", (request_id,))[0]
 
     def lab_requests_for_doctor(self, user_id, hours=24):
@@ -898,7 +936,7 @@ class Database:
     # ---------- recherche & archives patients (DPI) ----------
     def search_patients(self, query, user_id=None):
         """Recherche par nom, prénom, date de naissance (jj/mm/aaaa ou année) ou N° d'identification."""
-        self._require(user_id, ("medecin", "accueil"))
+        self._require(user_id, ("medecin", "accueil", "soins", "coord_para"))
         q = (query or "").strip()
         if len(q) < 2:
             return []
@@ -930,9 +968,20 @@ class Database:
             g["visits"] += 1
         return list(groups.values())
 
+    def _dpi_level(self, user_id):
+        """'medecin' : historique clinique complet ; 'soins' : paramédical AUTORISÉ (functions.DPI_CLINICAL_PARAMED) : historique sans les notes
+        des médecins ni la psychologie ; 'accueil' : identité et passages seulement."""
+        role = self._require(user_id, ("medecin", "accueil", "soins", "coord_para"))
+        if role == "medecin":
+            return "medecin"
+        if role in ("soins", "coord_para"):
+            fn = (self._one("SELECT function FROM users WHERE id=?", (user_id,)) or {}).get("function")
+            return "soins" if fn in DPI_CLINICAL_PARAMED else "accueil"
+        return "accueil"
+
     def patient_record(self, admission_id, user_id=None, station=""):
-        """Dossier patient informatisé. Médecin : historique clinique complet. Accueil : identité et passages seulement."""
-        role = self._require(user_id, ("medecin", "accueil"))
+        """Dossier patient informatisé : voir _dpi_level pour les niveaux d'accès. Chaque consultation du dossier est tracée."""
+        role = self._dpi_level(user_id)
         a = self.get(admission_id)
         if not a:
             raise ValueError("Dossier introuvable.")
@@ -940,17 +989,24 @@ class Database:
                             OR (name_norm=:n AND gender=:g AND ABS(birth_year-:y)<=1) ORDER BY created_at DESC""",
                          {"i": a["patient_ident"], "n": a["name_norm"], "g": a["gender"], "y": a["birth_year"]})
         with self._tx() as c:
-            self._audit(c, admission_id, "DPI_VIEW", {"user": user_id, "level": role}, station)
+            self._audit(c, admission_id, "DPI_VIEW", {"user": user_id, "level": role,
+                                                       "function": (self._one("SELECT function FROM users WHERE id=?", (user_id,)) or {}).get("function")}, station)
         visits = []
         for r in rows:
             v = {"admission": r}
-            if role == "medecin":
+            if role == "soins" and r["service_code"] == "PSY":
+                v["restricted"] = True                       # psychologie : contenu réservé aux médecins
+            elif role in ("medecin", "soins"):
                 v["consultations"] = self._all("""SELECT c.*, u.last_name AS doc_last, u.first_name AS doc_first FROM consultations c
                                                   LEFT JOIN users u ON u.id=c.doctor_user_id WHERE c.admission_id=? ORDER BY c.id""", (r["id"],))
                 v["prescriptions"] = [self._rx(x["uuid"]) for x in self._all("SELECT uuid FROM prescriptions WHERE admission_id=? ORDER BY id", (r["id"],))]
                 v["lab_requests"] = self._labs("WHERE l.admission_id=?", (r["id"],))
                 v["radiology"] = self._all(_RADIO_SELECT + " WHERE r.admission_id=? ORDER BY r.id", (r["id"],))
                 v["vitals"] = self._vitals(r["id"])
+                v["acts"] = self._all("SELECT * FROM acts WHERE admission_id=? ORDER BY at, id", (r["id"],))
+                if role == "soins":                          # le paramédical ne voit pas les observations libres du médecin
+                    for cn in v["consultations"]:
+                        cn["notes"] = ""
             visits.append(v)
         return {"level": role, "patient": {"display": display_name(a), "birth": birth_text(a), "gender": a["gender"],
                                            "ident": a["patient_ident"] or ""}, "visits": visits}
@@ -1007,6 +1063,7 @@ class Database:
             vid = c.execute("INSERT INTO vitals(admission_id,user_id,recorded_at,vitals_json) VALUES (?,?,?,?)",
                             (adm_id, user_id, now(), self._enc(json.dumps(v, ensure_ascii=False)))).lastrowid
             self._audit(c, adm_id, "VITALS", {"user": user_id}, "")
+            self._act(c, adm_id, user_id, "CONSTANTES", "Constantes vitales", vid, v)
         return next(x for x in self._vitals(adm_id) if x["id"] == vid)
 
     def vitals_for_admission(self, adm_id, user_id=None):
@@ -1030,6 +1087,7 @@ class Database:
                       (service_code, triage if svc["triage"] else None, adm_id))
             c.execute("DELETE FROM drafts WHERE admission_id=? AND kind='soins'", (adm_id,))
             self._audit(c, adm_id, "ORIENT", {"from": a["service_code"], "to": service_code, "triage": triage, "user": user_id}, "")
+            self._act(c, adm_id, user_id, "ORIENTATION", f"Orientation {a['service_code']} → {service_code}", detail={"triage": triage}, service=a["service_code"])
         return self.get(adm_id)
 
     # ---------- vues globales des coordinateurs ----------
@@ -1243,8 +1301,32 @@ class Database:
         self._tv_notify({"type": "screens"})
         return clean
 
-    # ---------- rendez-vous du laboratoire ----------
-    def _appt_clean(self, d):
+    # ---------- rendez-vous (tous services) ----------
+    _APPT_NOT = ("URG", "SOINS")          # pas de rendez-vous pour les urgences ni la salle de soins (accueil sans rendez-vous)
+
+    def _appt_scope(self, user_id):
+        """(rôle, services autorisés ou None = tous) : accueil = tous ; labo / radio = leur service ; médecin = ses services."""
+        role = self._require(user_id, ("accueil", "labo", "radio", "medecin"))
+        if role == "accueil":
+            return role, None
+        if role == "labo":
+            return role, {"LAB", "LABP"}
+        if role == "radio":
+            return role, {"RAD"}
+        u = self._one("SELECT services, function FROM users WHERE id=?", (user_id,))
+        svc = {s for s in (u["services"] or "").split(",") if s} or set(DEFAULT_SERVICES.get(u["function"], [])) or {"MG"}
+        return role, svc
+
+    def _appt_qr(self, token):
+        return f"SDEMR1{token}{self._sign('rdv' + token)[:12]}"
+
+    def _appt_row(self, r):
+        if r and r.get("token"):
+            r["qr_text"] = self._appt_qr(r["token"])
+        return r
+
+    def _appt_clean(self, d, scope):
+        role, allowed = scope
         last, first = (d.get("last_name") or "").strip(), (d.get("first_name") or "").strip()
         if not last or not first:
             raise ValueError("Nom et prénom obligatoires.")
@@ -1252,45 +1334,353 @@ class Database:
             datetime.strptime(d["date"], "%Y-%m-%d"); datetime.strptime(d["time"], "%H:%M")
         except (KeyError, ValueError):
             raise ValueError("Date (AAAA-MM-JJ) ou heure (HH:MM) invalide.")
-        return (last.upper(), first, d.get("birth_year"), (d.get("phone") or "").strip(), (d.get("ident") or "").strip(),
-                d["date"], d["time"], (d.get("exam") or "").strip(), (d.get("notes") or "").strip())
+        svc = d.get("service_code") or (("LAB" if role == "labo" else None) or ("RAD" if role == "radio" else None) or (sorted(allowed)[0] if allowed else None))
+        if svc not in SERVICE_BY_CODE or svc in self._APPT_NOT:
+            raise ValueError("Service invalide pour un rendez-vous.")
+        if allowed is not None and svc not in allowed:
+            raise PermissionError("Vous ne pouvez gérer que les rendez-vous de votre service.")
+        by = d.get("birth_year")
+        try:
+            by = int(by) if by not in (None, "") else None
+        except (TypeError, ValueError):
+            raise ValueError("Année de naissance invalide.")
+        if by is not None and not 1890 <= by <= date.today().year:
+            raise ValueError("Année de naissance invalide.")
+        if d.get("gender") not in (None, "", "H", "F"):
+            raise ValueError("Sexe invalide (H ou F).")
+        return {"last_name": last.upper(), "first_name": first, "birth_year": by, "phone": (d.get("phone") or "").strip(),
+                "ident": (d.get("ident") or "").strip(), "date": d["date"], "time": d["time"], "exam": (d.get("exam") or "").strip(),
+                "notes": (d.get("notes") or "").strip(), "service_code": svc, "gender": d.get("gender") or None,
+                "doctor_user_id": d.get("doctor_user_id") or None}
+
+    def _appt_check_scope(self, a, scope):
+        if not a:
+            raise ValueError("Rendez-vous introuvable.")
+        if scope[1] is not None and (a.get("service_code") or "LAB") not in scope[1]:
+            raise PermissionError("Ce rendez-vous appartient à un autre service.")
 
     def create_appointment(self, d, user_id=None):
-        self._require(user_id, ("labo",))
-        v = self._appt_clean(d)
+        scope = self._appt_scope(user_id)
+        v = self._appt_clean(d, scope)
+        token = uuid.uuid4().hex[:12]
         with self._tx() as c:
-            aid = c.execute("""INSERT INTO appointments(last_name,first_name,birth_year,phone,ident,date,time,exam,notes,created_at,created_by)
-                               VALUES (?,?,?,?,?,?,?,?,?,?,?)""", v + (now(), user_id)).lastrowid
-            self._audit(c, None, "APPT_CREATE", {"id": aid, "user": user_id}, "")
-        return self._one("SELECT * FROM appointments WHERE id=?", (aid,))
+            n = c.execute("SELECT COALESCE(MAX(number),0)+1 FROM appointments WHERE date=? AND service_code=?", (v["date"], v["service_code"])).fetchone()[0]
+            aid = c.execute("""INSERT INTO appointments(last_name,first_name,birth_year,phone,ident,date,time,exam,notes,created_at,created_by,
+                               service_code,number,token,doctor_user_id,gender) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (v["last_name"], v["first_name"], v["birth_year"], v["phone"], v["ident"], v["date"], v["time"], v["exam"], v["notes"],
+                             now(), user_id, v["service_code"], n, token, v["doctor_user_id"], v["gender"])).lastrowid
+            self._audit(c, None, "APPT_CREATE", {"id": aid, "user": user_id, "service": v["service_code"]}, "")
+        return self._appt_row(self._one("SELECT * FROM appointments WHERE id=?", (aid,)))
 
     def update_appointment(self, appt_id, d, user_id=None):
-        self._require(user_id, ("labo",))
-        v = self._appt_clean(d)
+        scope = self._appt_scope(user_id)
+        old = self._one("SELECT * FROM appointments WHERE id=?", (appt_id,))
+        self._appt_check_scope(old, scope)
+        if old["admission_id"] and old["status"] in ("ARRIVED", "DONE"):
+            raise ValueError("Ce rendez-vous a déjà été honoré : il ne peut plus être modifié.")
+        v = self._appt_clean({**old, **d, "service_code": d.get("service_code") or old.get("service_code") or "LAB"}, scope)
+        status = d.get("status", old["status"])
+        if status not in ("PLANNED", "ARRIVED", "DONE", "CANCELLED"):
+            raise ValueError("Statut invalide.")
         with self._tx() as c:
-            c.execute("""UPDATE appointments SET last_name=?,first_name=?,birth_year=?,phone=?,ident=?,date=?,time=?,exam=?,notes=?,status=?
-                         WHERE id=?""", v + (d.get("status", "PLANNED"), appt_id))
+            c.execute("""UPDATE appointments SET last_name=?,first_name=?,birth_year=?,phone=?,ident=?,date=?,time=?,exam=?,notes=?,status=?,
+                         service_code=?,doctor_user_id=?,gender=? WHERE id=?""",
+                      (v["last_name"], v["first_name"], v["birth_year"], v["phone"], v["ident"], v["date"], v["time"], v["exam"], v["notes"], status,
+                       v["service_code"], v["doctor_user_id"], v["gender"], appt_id))
             self._audit(c, None, "APPT_UPDATE", {"id": appt_id, "user": user_id}, "")
-        return self._one("SELECT * FROM appointments WHERE id=?", (appt_id,))
+        return self._appt_row(self._one("SELECT * FROM appointments WHERE id=?", (appt_id,)))
 
     def delete_appointment(self, appt_id, user_id=None):
-        self._require(user_id, ("labo",))
+        scope = self._appt_scope(user_id)
+        self._appt_check_scope(self._one("SELECT * FROM appointments WHERE id=?", (appt_id,)), scope)
         with self._tx() as c:
-            c.execute("DELETE FROM appointments WHERE id=?", (appt_id,))
+            c.execute("DELETE FROM appointments WHERE id=? AND admission_id IS NULL", (appt_id,))
             self._audit(c, None, "APPT_DELETE", {"id": appt_id, "user": user_id}, "")
 
-    def list_appointments(self, date_from, date_to, query="", user_id=None):
-        self._require(user_id, ("labo",))
+    def list_appointments(self, date_from, date_to, query="", user_id=None, service=None):
+        role, allowed = self._appt_scope(user_id)
         sql, args = "SELECT * FROM appointments WHERE date BETWEEN ? AND ?", [date_from, date_to]
+        if allowed is not None:
+            sql += f" AND COALESCE(service_code,'LAB') IN ({','.join('?' * len(allowed))})"; args += sorted(allowed)
+        if service:
+            sql += " AND COALESCE(service_code,'LAB')=?"; args.append(service)
         if query.strip():
             sql += " AND (last_name LIKE ? OR first_name LIKE ? OR ident LIKE ? OR phone LIKE ?)"; args += [f"%{query.strip()}%"] * 4
-        return self._all(sql + " ORDER BY date, time, id", args)
+        return [self._appt_row(r) for r in self._all(sql + " ORDER BY date, time, id", args)]
 
-    def appointment_days(self, month, user_id=None):
+    def appointment_days(self, month, user_id=None, service=None):
         """month = 'AAAA-MM' -> {jour: nombre de rendez-vous} (surbrillance du calendrier)."""
-        self._require(user_id, ("labo",))
-        return {r["date"]: r["n"] for r in self._all(
-            "SELECT date, COUNT(*) AS n FROM appointments WHERE date LIKE ? AND status!='CANCELLED' GROUP BY date", (month + "-%",))}
+        role, allowed = self._appt_scope(user_id)
+        sql, args = "SELECT date, COUNT(*) AS n FROM appointments WHERE date LIKE ? AND status!='CANCELLED'", [month + "-%"]
+        if allowed is not None:
+            sql += f" AND COALESCE(service_code,'LAB') IN ({','.join('?' * len(allowed))})"; args += sorted(allowed)
+        if service:
+            sql += " AND COALESCE(service_code,'LAB')=?"; args.append(service)
+        return {r["date"]: r["n"] for r in self._all(sql + " GROUP BY date", args)}
+
+    def _appt_find(self, ref):
+        ref = str(ref or "").strip()
+        m = re.fullmatch(r"SDEMR1([0-9a-f]{12})([0-9a-f]{12})", ref)
+        if m:
+            if not hmac.compare_digest(self._sign("rdv" + m.group(1))[:12], m.group(2)):
+                raise ValueError("QR code de rendez-vous invalide (signature incorrecte).")
+            return self._one("SELECT * FROM appointments WHERE token=?", (m.group(1),))
+        if ref.isdigit():
+            return self._one("SELECT * FROM appointments WHERE id=?", (int(ref),))
+        raise ValueError("Code de rendez-vous non reconnu.")
+
+    def appointment_checkin(self, ref, user_id=None, station="", extra=None):
+        """Arrivée du patient le jour J (scan du QR du ticket ou bouton) : crée le passage et l'insère dans la file du service
+        À SA PLACE (heure du rendez-vous), sans ressaisie. `ref` = texte du QR ou n° interne du rendez-vous."""
+        scope = self._appt_scope(user_id)
+        if scope[0] == "medecin":
+            raise PermissionError("L'enregistrement de l'arrivée se fait à l'accueil (ou au poste du service d'examen).")
+        a = self._appt_find(ref)
+        self._appt_check_scope(a, scope)
+        if a["status"] == "CANCELLED":
+            raise ValueError("Ce rendez-vous a été annulé.")
+        if a["admission_id"]:
+            raise ValueError(f"Patient déjà enregistré à l'arrivée ({a['checkin_at'] or ''}).")
+        if a["date"] != date.today().isoformat():
+            raise ValueError(f"Ce rendez-vous est prévu le {a['date'][8:10]}/{a['date'][5:7]}/{a['date'][:4]} à {a['time']}.")
+        ex = extra or {}
+        gender, by = a.get("gender") or ex.get("gender"), a.get("birth_year") or ex.get("birth_year")
+        if gender not in ("H", "F") or not by:
+            raise ValueError("INCOMPLET:sexe et/ou année de naissance manquants pour ce rendez-vous.")
+        svc = a.get("service_code") or "LAB"
+        adm = self.add_admission({"last_name": a["last_name"], "first_name": a["first_name"], "gender": gender, "service_code": svc,
+                                  "parsed": {"birth_date": None, "birth_year": int(by)}, "ident": a.get("ident") or "", "user_id": user_id}, station)
+        with self._tx() as c:
+            c.execute("UPDATE admissions SET sort_ts=?, appt_id=? WHERE id=?", (f"{a['date']} {a['time']}:00", a["id"], adm["id"]))
+            c.execute("UPDATE appointments SET status='ARRIVED', admission_id=?, checkin_at=?, gender=?, birth_year=? WHERE id=?",
+                      (adm["id"], now(), gender, int(by), a["id"]))
+            self._act(c, adm["id"], user_id, "RDV", f"Arrivée sur rendez-vous de {a['time']} (n° {a['number'] or '-'})", a["id"], service=svc)
+        return {"admission": self.get(adm["id"]), "appointment": self._appt_row(self._one("SELECT * FROM appointments WHERE id=?", (a["id"],)))}
+
+    # ---------- messagerie interne poste à poste ----------
+    _MSG_MAX_RECIPIENTS = 60
+
+    def _msg_user(self, user_id):
+        u = self._one("SELECT id, last_name, first_name, function, role, services, active FROM users WHERE id=?", (user_id,))
+        if not u or not u["active"]:
+            raise PermissionError("Session invalide : reconnectez-vous.")
+        return u
+
+    @staticmethod
+    def _msg_name(u):
+        return f"{honorific(u['function'])}{u['last_name']} {u['first_name']}".strip()
+
+    def _msg_groups_of(self, u):
+        return [k for k, (_lbl, fns) in MSG_GROUPS.items() if u["function"] in fns]
+
+    def _msg_origin(self, u, station=""):
+        svc = ", ".join(SERVICE_BY_CODE[s]["name"] for s in (u["services"] or "").split(",") if s in SERVICE_BY_CODE)
+        return " · ".join(x for x in (SPACE_LABELS.get(u["role"], u["role"]), svc, (station or "").strip()) if x)[:160]
+
+    def message_recipients(self, user_id=None):
+        """Destinataires possibles : un agent ne peut écrire qu'aux groupes de coordination (ou à leurs membres) ; un coordinateur, à tout agent actif."""
+        self._require(user_id, ROLES)
+        me = self._msg_user(user_id)
+        coord = me["function"] in MSG_COORDINATORS
+        users = self._all("SELECT id, last_name, first_name, function, role, services FROM users WHERE active=1 AND id!=? ORDER BY role, last_name, first_name", (user_id,))
+        out_users = [{"id": u["id"], "label": f"{self._msg_name(u)} — {u['function']}", "function": u["function"], "role": u["role"],
+                      "space": SPACE_LABELS.get(u["role"], "")} for u in users if coord or u["function"] in MSG_COORDINATORS]
+        groups = [{"key": k, "label": lbl, "members": sum(1 for u in users if u["function"] in fns)} for k, (lbl, fns) in MSG_GROUPS.items()]
+        return {"coordinator": coord, "groups": groups if not coord else [], "users": out_users}
+
+    def send_message(self, d, user_id=None, station=""):
+        """d = {reason, body?, priority?, to_user_ids?[], to_group?, reply_to?}. Coordinateur -> CONVOCATION (agents) ; agent -> SIGNALEMENT (groupes
+        de coordination) ; réponse à un message reçu -> REPONSE. Jamais diffusé sur les écrans TV."""
+        self._require(user_id, ROLES)
+        me = self._msg_user(user_id)
+        reason, body = (d.get("reason") or "").strip(), (d.get("body") or "").strip()
+        if not reason:
+            raise ValueError("Le motif est obligatoire.")
+        if len(reason) > 200 or len(body) > 2000:
+            raise ValueError("Message trop long (motif 200 caractères, détail 2000).")
+        prio = "URGENT" if d.get("priority") == "URGENT" else "NORMAL"
+        coord = me["function"] in MSG_COORDINATORS
+        targets, group, kind, reply_to = [], None, None, None
+        if d.get("reply_to"):
+            orig = self._one("SELECT * FROM messages WHERE id=?", (d["reply_to"],))
+            mine = orig and (orig["to_user_id"] == user_id or (orig["to_group"] in self._msg_groups_of(me)))
+            if not mine:
+                raise PermissionError("Vous ne pouvez répondre qu'à un message qui vous est destiné.")
+            kind, targets, reply_to = "REPONSE", [orig["from_user_id"]], orig["id"]
+        elif coord:
+            kind = "CONVOCATION"
+            targets = list(dict.fromkeys(int(x) for x in (d.get("to_user_ids") or [])))
+            if not targets:
+                raise ValueError("Choisissez au moins un agent à convoquer.")
+        else:
+            kind = "SIGNALEMENT"
+            group = d.get("to_group")
+            if group:
+                if group not in MSG_GROUPS:
+                    raise ValueError("Groupe de coordination inconnu.")
+            else:
+                targets = list(dict.fromkeys(int(x) for x in (d.get("to_user_ids") or [])))
+                if not targets:
+                    raise ValueError("Choisissez un coordinateur ou un groupe de coordination.")
+        if len(targets) > self._MSG_MAX_RECIPIENTS:
+            raise ValueError("Trop de destinataires.")
+        for t in targets:
+            u = self._one("SELECT function, active FROM users WHERE id=?", (t,))
+            if not u or not u["active"] or t == user_id:
+                raise ValueError("Destinataire invalide ou inactif.")
+            if kind == "SIGNALEMENT" and u["function"] not in MSG_COORDINATORS:
+                raise PermissionError("Un agent ne peut écrire qu'à un coordinateur ou au responsable des urgences.")
+        origin, name, ids = self._msg_origin(me, station), self._msg_name(me), []
+        with self._tx() as c:
+            for t in (targets or [None]):
+                ids.append(c.execute("""INSERT INTO messages(kind,priority,created_at,from_user_id,from_name,from_function,from_service,to_user_id,to_group,
+                                        reason,body,reply_to) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                     (kind, prio, now(), user_id, name, me["function"], origin, t, group if t is None else None,
+                                      self._enc(reason), self._enc(body) if body else None, reply_to)).lastrowid)
+            self._audit(c, None, "MSG_SEND", {"ids": ids, "kind": kind, "from": user_id, "to": targets or group}, station)
+        return [self._one("SELECT * FROM messages WHERE id=?", (i,)) for i in ids]
+
+    def _msg_scope(self, me):
+        groups = self._msg_groups_of(me)
+        ph = ",".join("?" * len(groups)) if groups else "''"
+        return f"(m.to_user_id=? OR m.to_group IN ({ph}))", [me["id"]] + groups
+
+    def inbox(self, user_id=None, limit=100):
+        self._require(user_id, ROLES)
+        me = self._msg_user(user_id)
+        cond, args = self._msg_scope(me)
+        return self._all(f"""SELECT m.*, r.read_at, r.ack_at FROM messages m LEFT JOIN message_reads r ON r.message_id=m.id AND r.user_id=?
+                             WHERE {cond} ORDER BY m.id DESC LIMIT ?""", [user_id] + args + [int(limit)])
+
+    def outbox(self, user_id=None, limit=100):
+        """Messages envoyés, avec l'état de lecture / d'accusé de réception côté destinataire."""
+        self._require(user_id, ROLES)
+        rows = self._all("""SELECT m.*, u.last_name AS to_last, u.first_name AS to_first, u.function AS to_function,
+                            (SELECT read_at FROM message_reads WHERE message_id=m.id AND user_id=m.to_user_id) AS read_at,
+                            (SELECT ack_at FROM message_reads WHERE message_id=m.id AND user_id=m.to_user_id) AS ack_at,
+                            (SELECT COUNT(*) FROM message_reads WHERE message_id=m.id AND read_at IS NOT NULL) AS n_read
+                            FROM messages m LEFT JOIN users u ON u.id=m.to_user_id WHERE m.from_user_id=? ORDER BY m.id DESC LIMIT ?""", (user_id, int(limit)))
+        for r in rows:
+            r["to_label"] = (f"{honorific(r['to_function'])}{r['to_last']} {r['to_first']}".strip() if r["to_user_id"]
+                             else MSG_GROUPS.get(r["to_group"], (r["to_group"],))[0])
+        return rows
+
+    def messages_poll(self, user_id=None, after_id=0):
+        """Interrogation périodique d'un poste : nombre de messages non lus + nouveaux messages (id > after_id) non lus."""
+        self._require(user_id, ROLES)
+        me = self._msg_user(user_id)
+        cond, args = self._msg_scope(me)
+        base = f"FROM messages m LEFT JOIN message_reads r ON r.message_id=m.id AND r.user_id=? WHERE {cond} AND r.read_at IS NULL"
+        unread = self._one(f"SELECT COUNT(*) AS n {base}", [user_id] + args)["n"]
+        new = self._all(f"SELECT m.*, r.read_at, r.ack_at {base} AND m.id>? ORDER BY m.id", [user_id] + args + [int(after_id or 0)])
+        return {"unread": unread, "new": new}
+
+    def _msg_visible(self, mid, me):
+        cond, args = self._msg_scope(me)
+        if not self._one(f"SELECT 1 AS x FROM messages m WHERE m.id=? AND {cond}", [mid] + args):
+            raise PermissionError("Message introuvable.")
+
+    def message_read(self, message_id, user_id=None):
+        self._require(user_id, ROLES)
+        self._msg_visible(message_id, self._msg_user(user_id))
+        with self._tx() as c:
+            c.execute("INSERT OR IGNORE INTO message_reads(message_id,user_id) VALUES (?,?)", (message_id, user_id))
+            c.execute("UPDATE message_reads SET read_at=COALESCE(read_at,?) WHERE message_id=? AND user_id=?", (now(), message_id, user_id))
+        return True
+
+    def message_ack(self, message_id, user_id=None):
+        """Accusé de réception (« Je me présente ») : visible par l'émetteur."""
+        self.message_read(message_id, user_id)
+        with self._tx() as c:
+            c.execute("UPDATE message_reads SET ack_at=COALESCE(ack_at,?) WHERE message_id=? AND user_id=?", (now(), message_id, user_id))
+        return True
+
+    # ---------- modèles de documents par rôle ----------
+    def _tpl_user(self, user_id):
+        self._require(user_id, ROLES)
+        return self._msg_user(user_id)
+
+    def doc_template_kinds(self, user_id=None):
+        u = self._tpl_user(user_id)
+        return [{"kind": k, "title": t} for k, t in doc_models.kinds_for(u["role"], u["function"])]
+
+    def list_doc_templates(self, user_id=None):
+        u = self._tpl_user(user_id)
+        kinds = dict(doc_models.kinds_for(u["role"], u["function"]))
+        if not kinds:
+            return []
+        rows = self._all(f"""SELECT t.id, t.kind, t.title, t.filename, t.mime, t.created_at, LENGTH(t.content_b64) AS size_b64, us.last_name, us.first_name
+                             FROM doc_templates t LEFT JOIN users us ON us.id=t.created_by
+                             WHERE t.role=? AND t.active=1 AND t.kind IN ({','.join('?' * len(kinds))}) ORDER BY t.kind, t.title, t.id""", [u["role"]] + list(kinds))
+        for r in rows:
+            r["kind_title"] = kinds[r["kind"]]
+            r["size"] = int((r.pop("size_b64") or 0) * 0.75)
+        return rows
+
+    def get_doc_template(self, template_id, user_id=None):
+        u = self._tpl_user(user_id)
+        t = self._one("SELECT * FROM doc_templates WHERE id=? AND active=1", (template_id,))
+        if not t or t["role"] != u["role"]:
+            raise ValueError("Modèle introuvable.")
+        return t
+
+    def import_doc_template(self, kind, filename, data_b64, user_id=None, title=None):
+        u = self._tpl_user(user_id)
+        if kind not in dict(doc_models.kinds_for(u["role"], u["function"])):
+            raise PermissionError("Ce type de modèle n'est pas disponible pour votre fonction.")
+        try:
+            data = base64.b64decode(data_b64 or "", validate=True)
+        except Exception:
+            raise ValueError("Fichier illisible.")
+        mime = doc_models.check_upload(filename, data)
+        if self._one("SELECT COUNT(*) AS n FROM doc_templates WHERE role=? AND kind=? AND active=1", (u["role"], kind))["n"] >= 20:
+            raise ValueError("Trop de modèles pour ce type : supprimez-en avant d'en ajouter.")
+        title = (title or "").strip()[:80] or doc_models.kind_title(kind)
+        with self._tx() as c:
+            tid = c.execute("""INSERT INTO doc_templates(role,kind,title,filename,mime,content_b64,created_by,created_at) VALUES (?,?,?,?,?,?,?,?)""",
+                            (u["role"], kind, title, os.path.basename(filename or "")[:120], mime, data_b64, user_id, now())).lastrowid
+            self._audit(c, None, "TEMPLATE_IMPORT", {"id": tid, "kind": kind, "user": user_id}, "")
+        return {"id": tid, "kind": kind, "title": title, "mime": mime}
+
+    def delete_doc_template(self, template_id, user_id=None):
+        t = self.get_doc_template(template_id, user_id)
+        with self._tx() as c:
+            c.execute("DELETE FROM doc_templates WHERE id=?", (t["id"],))
+            self._audit(c, None, "TEMPLATE_DELETE", {"id": t["id"], "kind": t["kind"], "user": user_id}, "")
+
+    def record_document_issued(self, adm_id, title, user_id=None):
+        """Trace l'établissement d'un document / certificat (le contenu n'est pas stocké sur le serveur)."""
+        self._require(user_id, ("medecin", "labo", "radio"))
+        if not self.get(adm_id):
+            raise ValueError("Patient introuvable.")
+        with self._tx() as c:
+            self._act(c, adm_id, user_id, "DOCUMENT", f"Document établi : {(title or '').strip()[:120]}")
+        return True
+
+    # ---------- traçabilité des actes ----------
+    SOIN_ACTS = ("Injection intramusculaire", "Injection intraveineuse", "Perfusion", "Pansement", "Suture", "Retrait de fils / agrafes", "Nébulisation",
+                 "Prélèvement sanguin", "ECG", "Surveillance", "Vaccination", "Autre soin")
+
+    def record_act(self, adm_id, label, note="", user_id=None):
+        """Acte de soins saisi par le personnel (ou le médecin), tracé avec auteur, service et horodatage."""
+        self._require(user_id, ("soins", "medecin"))
+        label = (label or "").strip()
+        if label not in self.SOIN_ACTS:
+            raise ValueError("Choisissez un acte dans la liste.")
+        a = self.get(adm_id)
+        if not a or a["status"] == "CANCELLED":
+            raise ValueError("Patient introuvable.")
+        with self._tx() as c:
+            aid = self._act(c, adm_id, user_id, "SOIN", label, detail={"note": (note or "").strip()[:500]} if (note or "").strip() else None)
+        return self._one("SELECT * FROM acts WHERE id=?", (aid,))
+
+    def acts_for_admission(self, adm_id, user_id=None):
+        if self._dpi_level(user_id) not in ("medecin", "soins"):
+            raise PermissionError("Accès au journal des actes réservé au personnel médical et paramédical autorisé.")
+        a = self.get(adm_id)
+        if self._dpi_level(user_id) == "soins" and a and a["service_code"] == "PSY":
+            return []
+        return self._all("SELECT * FROM acts WHERE admission_id=? ORDER BY at, id", (adm_id,))
 
     # ---------- statistiques DSP (agrégats anonymes) ----------
     def stats_report(self, date_from, date_to):

@@ -64,7 +64,7 @@ class ReceptionWindow(BaseWindow):
             self.codes = [s["code"] for s in SERVICES]
         else:
             self.codes = [c for c in cfg.get("services", []) if c in SERVICE_BY_CODE]
-        for label, fn in (("🔎 Dossiers patients", self.open_dpi), ("📺 Écrans TV", self.open_tv_control), ("🔄 Réinitialiser les compteurs", self.reset_counters)):
+        for label, fn in (("📅 Rendez-vous", self.open_appointments), ("🔎 Dossiers patients", self.open_dpi), ("📺 Écrans TV", self.open_tv_control), ("🔄 Réinitialiser les compteurs", self.reset_counters)):
             b = QPushButton(label); b.clicked.connect(fn); self.header_extra.addWidget(b)
         body = QHBoxLayout(); self.content.addLayout(body, 1)
         body.addWidget(self._build_form(), 5)

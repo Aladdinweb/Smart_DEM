@@ -9,7 +9,7 @@ class HubError(ConnectionError):
 
 
 class RemoteDatabase:
-    LONG = {"add_result", "get_result", "import_drugs"}
+    LONG = {"add_result", "get_result", "import_drugs", "import_doc_template", "get_doc_template"}
 
     def __init__(self, host, port, token, timeout=6, use_tls=False, tls_port=5443, cert_pem=""):
         self.http_base = f"http://{host}:{port}"

@@ -68,7 +68,7 @@ def _make(pdf_path=None, name=None, size_mm=None, margin=2):
     return pr
 
 
-def print_document(cfg, html_text, resources, kind, name, printer_name=None, width_mm=None, template_kind=None):
+def print_document(cfg, html_text, resources, kind, name, printer_name=None, width_mm=None, template_kind=None, tpl_pixmap=None):
     """kind = 'ticket' (rouleau 58/80 mm, hauteur ajustée au contenu) ou 'a4'.
     Retourne (ok, message). Le PDF est TOUJOURS enregistré dans %LOCALAPPDATA%\\Smart_DEM\\tickets|documents."""
     try:
@@ -87,7 +87,7 @@ def print_document(cfg, html_text, resources, kind, name, printer_name=None, wid
             size_mm = (w, h_px / PX_PER_MM + 2 * margin + 2)
             folder, printer_cfg = "tickets", cfg.get("printer", "")
         else:
-            tpl = templates.load_template(cfg, template_kind) if template_kind else None
+            tpl = tpl_pixmap if tpl_pixmap is not None else (templates.load_template(cfg, template_kind) if template_kind else None)   # trame importée (DB) ou locale
             margin, size_mm = (0 if tpl else 10), None
             doc.setPageSize(QSizeF((210 - 2 * margin) * PX_PER_MM, (297 - 2 * margin) * PX_PER_MM))
             folder, printer_cfg = os.path.join("documents", name.split("_")[0]), cfg.get("doc_printer", "")
@@ -129,3 +129,41 @@ def ticket_html(cfg, row):
 
 def print_ticket(cfg, row, printer_name=None, width_mm=None):
     return print_document(cfg, ticket_html(cfg, row), {}, "ticket", row["ticket_label"], printer_name, width_mm)
+
+
+def appt_ticket_html(cfg, a):
+    """Ticket de rendez-vous (rouleau 58/80 mm) : service, date, heure, n° de passage et QR code à scanner à l'arrivée (retourne (html, ressources))."""
+    import html as _h
+    from qr import qr_image
+    from PyQt6.QtGui import QPixmap
+    svc = SERVICE_BY_CODE.get(a.get("service_code") or "LAB", {"name": a.get("service_code") or "", "icon": ""})
+    e = _h.escape
+    res = {}
+    img = qr_image(a["qr_text"], scale=6) if a.get("qr_text") else None
+    qr_cell = ""
+    if img is not None:
+        res["qr"] = QPixmap.fromImage(img)
+        qr_cell = "<p style='margin:3px'><img src='qr' width='120' height='120'></p>"
+    logo = "<img src='logo_ministere' width='34' height='34'>" if logo_path() else ""
+    d = datetime.strptime(a["date"], "%Y-%m-%d")
+    html = f"""<div style='text-align:center;font-family:Arial'>
+<table width='100%' cellspacing='0' cellpadding='0'><tr>
+<td width='14%'>{logo}</td>
+<td align='center'><p style='font-size:6pt;font-weight:bold;margin:0'>République Algérienne Démocratique et Populaire</p>
+<p style='font-size:6pt;margin:0'>Ministère de la Santé</p></td>
+<td width='14%' align='right'><img src='drapeau' width='34' height='34'></td></tr></table>
+<p style='font-size:8pt;font-weight:bold;margin:2px 0 3px 0'>{e(establishment(cfg))}</p><hr>
+<p style='font-size:10pt;font-weight:bold;margin:2px'>TICKET DE RENDEZ-VOUS</p>
+<p style='font-size:11pt;margin:2px'>{e(svc['name'])}</p>
+<p style='font-size:20pt;font-weight:bold;margin:2px'>{d:%d/%m/%Y} — {e(a['time'])}</p>
+<p style='font-size:10pt;margin:2px'>N° de passage : <b>{e(str(a.get('number') or '-'))}</b></p>
+<p style='font-size:9pt;margin:2px'>{e((a.get('last_name') or '').upper())} {e(a.get('first_name') or '')}</p>
+{('<p style="font-size:8pt;margin:2px">' + e(a['exam']) + '</p>') if a.get('exam') else ''}{qr_cell}
+<p style='font-size:7pt;margin:2px'>Présentez ce ticket (QR code) à l'accueil le jour du rendez-vous.</p><hr>
+<p style='font-size:7pt;margin:0'>Merci d'être à l'heure.</p></div>"""
+    return html, res
+
+
+def print_appt_ticket(cfg, a, printer_name=None, width_mm=None):
+    html, res = appt_ticket_html(cfg, a)
+    return print_document(cfg, html, res, "ticket", f"RDV_{a['date']}_{a.get('number') or a['id']}", printer_name, width_mm)

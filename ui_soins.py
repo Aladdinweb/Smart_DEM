@@ -5,14 +5,15 @@ from datetime import datetime
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QComboBox, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
-                             QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout)
+                             QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 import userdata
 from data_structures import CONSULT_SERVICES, SERVICE_BY_CODE
-from database import FMT, age_from_row, display_name
+from database import FMT, Database, age_from_row, display_name
 from functions import format_vitals
 from styles import TRIAGE_COLORS, TRIAGE_ICON, TRIAGE_TEXT
 from ui_common import BaseWindow, HandoverDialog, guard, open_tv
+from ui_dpi import PatientSearchDialog
 
 
 class SoinsWindow(BaseWindow):
@@ -23,6 +24,7 @@ class SoinsWindow(BaseWindow):
         self.current, self._last_draft = None, None
         self.btn_hand = QPushButton("📥 Reprises (0)"); self.btn_hand.clicked.connect(self.open_handovers); self.header_extra.addWidget(self.btn_hand)
         b = QPushButton("🔁 Relève de garde / Changer de compte"); b.clicked.connect(self.logout); self.header_extra.addWidget(b)
+        d = QPushButton("🔎 Dossiers patients"); d.clicked.connect(self.open_dpi); self.header_extra.addWidget(d)
         if cfg.get("tv_screen"):
             t = QPushButton("📺 Ouvrir l'écran TV"); t.clicked.connect(lambda *_: open_tv(self.cfg)); self.header_extra.addWidget(t)
         body = QHBoxLayout(); self.content.addLayout(body, 1)
@@ -67,6 +69,13 @@ class SoinsWindow(BaseWindow):
         gl.addLayout(r1); gl.addLayout(r2); gl.addWidget(self.note); gl.addWidget(sv); gl.addWidget(self.hist)
         rv.addWidget(g)
 
+        a = QGroupBox("Actes de soins (tracés dans le dossier)"); al = QHBoxLayout(a)
+        self.act = QComboBox(); self.act.addItems(Database.SOIN_ACTS)
+        self.act_note = QLineEdit(); self.act_note.setPlaceholderText("Précision (facultatif)")
+        sa = QPushButton("🧾 Enregistrer l'acte"); sa.clicked.connect(self.save_act)
+        al.addWidget(self.act, 2); al.addWidget(self.act_note, 3); al.addWidget(sa, 2)
+        rv.addWidget(a)
+
         o = QGroupBox("Orientation vers le triage médical"); ol = QVBoxLayout(o)
         self.dest = QComboBox()
         for c in CONSULT_SERVICES:
@@ -82,7 +91,8 @@ class SoinsWindow(BaseWindow):
         for x in (self.dest,):
             ol.addWidget(x)
         ol.addLayout(tl); ol.addWidget(go); rv.addWidget(o); rv.addStretch()
-        body.addWidget(right, 4)
+        sc = QScrollArea(); sc.setWidgetResizable(True); sc.setFrameShape(QFrame.Shape.NoFrame); sc.setWidget(right)      # 4:3 : la colonne défile
+        body.addWidget(sc, 4)
         self._sync_triage()
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self.call_next)
         self.t = QTimer(self); self.t.timeout.connect(self.refresh); self.t.start(3000)
@@ -170,6 +180,22 @@ class SoinsWindow(BaseWindow):
         for x in (self.sys, self.dia, self.glyc, self.temp, self.note):
             x.clear()
         self._show_hist(); self.show_banner("✅ Constantes enregistrées dans le dossier du patient.")
+
+    @guard
+    def save_act(self, *_):
+        if not self.current:
+            return self.show_banner("Appelez d'abord un patient.", "error")
+        try:
+            self.db.record_act(self.current["id"], self.act.currentText(), self.act_note.text(), self.user["id"])
+        except ValueError as e:
+            return self.show_banner(str(e), "error")
+        self.log("acte", f"{self.current['ticket_label']} {self.act.currentText()}")
+        self.act_note.clear(); self.show_banner("✅ Acte enregistré et tracé dans le dossier.")
+
+    @guard
+    def open_dpi(self, *_):
+        if self.user:
+            PatientSearchDialog(self.db, self.user, self.cfg, self).exec()
 
     @guard
     def orient(self, *_):

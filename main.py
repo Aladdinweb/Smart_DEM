@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 from config_manager import Config, data_dir, resource_path
 from database import Database, now
 from styles import stylesheet
+from ui_layout import install_screen_fit, profile
 
 # Routage par rôle : un utilisateur n'ouvre QUE l'espace de son rôle (aucune navigation vers les autres espaces).
 ROLES = ("accueil", "medecin", "radio", "pharmacie", "labo", "soins", "coord_med", "coord_para")
@@ -62,6 +63,7 @@ def selftest(outfile):
             lines.append(f"OK espace {role}")
         import ui_settings, ui_dpi, ui_sigeditor, ui_login, hub_server, remote_db, github_updater, sync, reports, documents  # noqa
         import printer, templates, barcode, qr, imgproc, fhir, tls, crypto  # noqa
+        import ui_messages, ui_templates, ui_appointments, ui_layout, doc_models  # noqa
         lines.append("OK modules")
     except Exception:
         ok = False
@@ -194,13 +196,14 @@ def main():
                                                              "le détail est enregistré dans error.log."))
     sys.excepthook = report
     threading.excepthook = lambda a: report(a.exc_type, a.exc_value, a.exc_traceback)
-    app.setStyleSheet(stylesheet(cfg.get("theme")))
+    install_screen_fit(app)
+    app.setStyleSheet(stylesheet(cfg.get("theme"), profile(cfg)["compact"]))
 
     if not cfg.get("configured"):
         from ui_setup import SetupDialog
         if SetupDialog(cfg).exec() != QDialog.DialogCode.Accepted:
             return 0
-        app.setStyleSheet(stylesheet(cfg.get("theme")))
+        app.setStyleSheet(stylesheet(cfg.get("theme"), profile(cfg)["compact"]))
 
     while True:
         try:
