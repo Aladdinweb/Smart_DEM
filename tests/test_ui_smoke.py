@@ -51,8 +51,9 @@ class UiSmoke(unittest.TestCase):
     def test_branding_logo_import_same_size_and_dynamic_header(self):
         from PyQt6.QtGui import QColor, QImage
         import branding
-        self.assertIsNone(branding.ministry_pixmap(64))
         flag = branding.flag_pixmap(64); self.assertFalse(flag.isNull())
+        shipped = branding.ministry_pixmap(64)                                    # v1.4.0 : logo officiel fourni avec le programme (assets/logo_ministere.png)
+        self.assertIsNotNone(shipped); self.assertEqual((shipped.width(), shipped.height()), (flag.width(), flag.height()))
         img = QImage(300, 300, QImage.Format.Format_RGB32); img.fill(QColor("#2e7d32")); src = os.path.join(TMP, "logo.png"); img.save(src)
         branding.import_logo(src); logo = branding.ministry_pixmap(64)
         self.assertEqual((logo.width(), logo.height()), (flag.width(), flag.height()))
