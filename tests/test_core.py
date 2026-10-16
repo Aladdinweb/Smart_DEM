@@ -264,7 +264,9 @@ class SecurityAndOpsTests(Base):
 
     def test_dsp_stats_are_anonymous_aggregates(self):
         self.add("A", "B", "MG", triage="ROUGE"); self.add("C", "D", "LAB"); self.db.call_next(["MG"], "D", self.doc)
-        st = self.db.stats_report("2000-01-01", "2100-01-01")
+        coord = self.db.create_user("Coord", "Stat", "COORDINATEUR DES MÉDECINS", "", "7777")
+        with self.assertRaises(PermissionError): self.db.stats_report("2000-01-01", "2100-01-01", self.doc)      # v1.5.0 : réservé aux responsables
+        st = self.db.stats_report("2000-01-01", "2100-01-01", coord)
         self.assertEqual((st["admissions"], st["by_service"], st["by_triage"]), (2, {"LAB": 1, "MG": 1}, {"ROUGE": 1}))
         self.assertFalse(any(n in str(st) for n in ("'A'", "'B'", "'C'", "'D'")))                       # aucun nom de patient
         from reports import report_csv, report_html
@@ -565,7 +567,7 @@ class HubTests(unittest.TestCase):
         self.assertEqual(self.rpc("call_next", ["MG"], "PC", self.acc, bearer=tok).status_code, 403)     # usurpation d'identité refusée
         self.assertEqual(self.rpc("call_next", ["MG"], "PC", self.doc, bearer=tok).status_code, 200)
         self.assertEqual(self.rpc("get_user", self.acc, bearer=tok).status_code, 403)                    # SELF_ONLY
-        self.assertEqual(self.rpc("create_user", "N", "P", "labo", "", "1234").status_code, 200)         # admin : jeton réseau
+        self.assertEqual(self.rpc("create_user", "N", "P", "labo", "", "1234").status_code, 401)         # v1.5.0 : le jeton réseau seul ne suffit plus (PIN administrateur vérifié par le Hub)
         self.assertEqual(self.rpc("current_shift", "PC", bearer=tok[:-2] + "xx").status_code, 401)
         self.assertEqual(self.c.get("/api/ping").get_json()["name"], "EPSP X — POLY Y")
 

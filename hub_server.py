@@ -6,7 +6,7 @@ from flask import Flask, Response, jsonify, request
 from flask_sock import Sock
 from werkzeug.serving import make_server
 
-from auth import make_token, verify_token
+from auth import ADMIN_AWARE_RPC, ADMIN_RPC, ADMIN_TTL, MANAGER_RPC, PUBLIC_RPC, make_token, verify_token
 from config_manager import data_dir
 from data_structures import SERVICE_BY_CODE, SERVICE_COLORS
 from database import RPC_METHODS
@@ -14,8 +14,6 @@ from tv_page import TV_HTML
 from version import __version__
 
 CURRENT = None   # instance active (pour le bouton « Tester l'écran TV »)
-PUBLIC_RPC = {"verify_pin", "list_users", "count_users", "tv_state", "tv_screens"}                      # jeton réseau seul
-ADMIN_RPC = {"create_user", "update_user", "delete_user", "reset_user_pin", "import_drugs", "tv_set_screens", "stats_report"}
 SELF_ONLY = {"set_user_image", "set_signature", "change_own_pin", "get_user"}                           # 1er argument = l'utilisateur du jeton
 
 
@@ -128,17 +126,26 @@ class Hub:
             m, a, k = d.get("m"), d.get("a", []), d.get("k", {})
             if m not in RPC_METHODS:
                 return jsonify({"error": "méthode inconnue (mettez à jour le Hub ?)"}), 400
-            uid = None
-            if m not in PUBLIC_RPC and m not in ADMIN_RPC:           # appel utilisateur : jeton JWT obligatoire
-                auth = request.headers.get("Authorization", "")
+            uid, admin = None, False
+            auth_h = request.headers.get("Authorization", "")
+            bearer = auth_h[7:] if auth_h.startswith("Bearer ") else ""
+            claims = None
+            if bearer or not (m in PUBLIC_RPC or m in ADMIN_AWARE_RPC):          # jeton facultatif pour les appels publics, sinon obligatoire
                 try:
-                    claims = verify_token(self.db.jwt_secret(), auth[7:] if auth.startswith("Bearer ") else "")
+                    claims = verify_token(self.db.jwt_secret(), bearer)
                 except ValueError as e:
-                    return jsonify({"error": str(e)}), 401
-                uid = claims["sub"]
-                if m in SELF_ONLY and (not a or a[0] != uid):
-                    return jsonify({"error": "Action réservée à votre propre compte."}), 403
-            self.db._ctx.uid = uid                                    # l'identité vient du jeton, pas des arguments
+                    if m not in PUBLIC_RPC and m not in ADMIN_AWARE_RPC:
+                        return jsonify({"error": str(e)}), 401
+            if claims is not None:
+                admin = claims.get("role") == "admin"
+                uid = None if admin else claims["sub"]
+            if m in ADMIN_RPC and not admin:                                      # sécurité réseau : le PIN administrateur est vérifié ICI, pas dans l'interface
+                return jsonify({"error": "Authentification administrateur requise (PIN vérifié par le Hub)."}), 403
+            if m in MANAGER_RPC and not (admin or uid is not None):
+                return jsonify({"error": "Session invalide : reconnectez-vous."}), 401
+            if m in SELF_ONLY and (not a or a[0] != uid):
+                return jsonify({"error": "Action réservée à votre propre compte."}), 403
+            self.db._ctx.uid, self.db._ctx.remote, self.db._ctx.admin = uid, True, admin     # l'identité vient du jeton, pas des arguments
             try:
                 result = getattr(self.db, m)(*a, **k)
             except PermissionError as e:
@@ -146,10 +153,12 @@ class Hub:
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
             finally:
-                self.db._ctx.uid = None
+                self.db._ctx.uid, self.db._ctx.remote, self.db._ctx.admin = None, False, False
             if m == "verify_pin" and isinstance(result, dict) and result.get("ok"):
                 u = result["user"]
                 result["token"] = make_token(self.db.jwt_secret(), u["id"], u["role"])
+            if m == "admin_login" and isinstance(result, dict) and result.get("ok"):
+                result["token"] = make_token(self.db.jwt_secret(), 0, "admin", ADMIN_TTL)
             return jsonify({"r": result})
 
         @app.post("/api/tv/pair")

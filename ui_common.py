@@ -7,7 +7,7 @@ from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QSizePolicy,
                              QPushButton, QVBoxLayout, QWidget)
 
-from branding import HeaderBar
+from branding import HeaderBar, establishment_rev, refresh_establishment
 from config_manager import data_dir
 from data_structures import SERVICE_BY_CODE
 import userdata
@@ -85,7 +85,8 @@ class BaseWindow(QMainWindow):
         self.root.setSpacing(6 if compact else 10)
         self._msg_after, self._msg_first, self._popups = 0, True, []
         self.prof = profile(cfg)
-        self.root.addWidget(HeaderBar(cfg, 44 if self.prof["compact"] else 64))
+        self.header_bar = HeaderBar(cfg, 44 if self.prof["compact"] else 64)
+        self.root.addWidget(self.header_bar)
         self.root.addWidget(self._build_header())
         self.content_widget = QWidget()
         self.content = QVBoxLayout(self.content_widget)
@@ -185,6 +186,9 @@ class BaseWindow(QMainWindow):
         except (ConnectionError, PermissionError, OSError):
             return
         self._set_badge(p["unread"])
+        if p.get("estab_rev", 0) != establishment_rev():               # noms officiels modifiés dans les Paramètres du Hub : en-tête mis à jour sans redémarrage
+            if refresh_establishment(self.db):
+                self.header_bar.refresh()
         new = p["new"]
         if not new:
             return
@@ -332,15 +336,9 @@ class BaseWindow(QMainWindow):
 
     # ---------- sécurité administrateur ----------
     def ask_pin(self, title):
-        if not self.cfg.has_pin():
-            return True
-        pin, ok = QInputDialog.getText(self, title, "Code PIN administrateur :", QLineEdit.EchoMode.Password)
-        if not ok:
-            return False
-        if self.cfg.check_pin(pin):
-            return True
-        QMessageBox.warning(self, title, "Code PIN incorrect.")
-        return False
+        """PIN administrateur vérifié par le Hub (session administrateur de 15 min) ; repli sur le PIN local seulement pour fermer l'application."""
+        from ui_login import admin_ok
+        return admin_ok(self.cfg, self, title, self.db, offline_ok=title.startswith("Fermeture"))
 
     def request_quit(self, *_):
         if self.ask_pin("Fermeture de l'application"):

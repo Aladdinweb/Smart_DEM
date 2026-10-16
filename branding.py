@@ -10,6 +10,9 @@ from config_manager import data_dir, resource_path
 GREEN, RED = "#006233", "#D21034"
 TITLE = "République Algérienne Démocratique et Populaire"
 MINISTRY = "Ministère de la Santé"
+TITLE_AR = "الجمهورية الجزائرية الديمقراطية الشعبية"
+MINISTRY_AR = "وزارة الصحة"
+AR_FONT = "'Segoe UI','Tahoma','Arial','DejaVu Sans','Noto Naskh Arabic'"
 
 
 def _blank(d):
@@ -114,8 +117,83 @@ def print_resources(d=220):
     return res
 
 
+# ---- établissement bilingue (v1.5.0) : valeurs tenues par le Hub, mises en cache sur chaque poste et rafraîchies dynamiquement ----
+_ESTAB = {}
+
+
+def set_establishment_cache(d):
+    _ESTAB.clear()
+    _ESTAB.update({k: v for k, v in (d or {}).items() if k in ("tutelle_fr", "tutelle_ar", "structure_fr", "structure_ar", "rev")})
+
+
+def establishment_rev():
+    return _ESTAB.get("rev", 0)
+
+
+def refresh_establishment(db):
+    """Recharge les noms officiels depuis le Hub / la base ; sans effet (valeurs en cache conservées) si le Hub est injoignable."""
+    try:
+        set_establishment_cache(db.get_establishment())
+        return True
+    except Exception:
+        return False
+
+
 def establishment(cfg):
-    return " - ".join(x for x in (cfg.get("parent", ""), cfg.get("structure", "")) if x)
+    """Nom officiel de la structure en français (Hub > configuration du poste)."""
+    return _ESTAB.get("structure_fr") or " - ".join(x for x in (cfg.get("parent", ""), cfg.get("structure", "")) if x)
+
+
+def establishment_ar(cfg=None):
+    return _ESTAB.get("structure_ar", "")
+
+
+def tutelle_fr(cfg=None):
+    return _ESTAB.get("tutelle_fr") or f"{TITLE} - {MINISTRY}"
+
+
+def tutelle_ar(cfg=None):
+    return _ESTAB.get("tutelle_ar") or f"{TITLE_AR} - {MINISTRY_AR}"
+
+
+def tutelle_fr_lines(cfg=None):
+    """Tutelle française sur deux lignes (République / Ministère) quand elle est de la forme « A - B »."""
+    return [p.strip() for p in tutelle_fr(cfg).split(" - ", 1) if p.strip()]
+
+
+def tutelle_block_html(cfg, pt_main, pt_sub):
+    """HTML d'impression : tutelle FR (2 lignes) puis tutelle AR."""
+    import html as _h
+    fr = tutelle_fr_lines(cfg)
+    out = f"<p style='margin:0;font-size:{pt_main}pt;font-weight:bold'>{_h.escape(fr[0])}</p>"
+    out += "".join(f"<p style='margin:0;font-size:{pt_sub}pt'>{_h.escape(t)}</p>" for t in fr[1:])
+    return out + f"<p dir='rtl' style='margin:0;font-size:{pt_sub}pt'>{_h.escape(tutelle_ar(cfg))}</p>"
+
+
+def structure_block_html(cfg, pt):
+    """HTML d'impression : nom de la structure en français puis, juste dessous, en arabe."""
+    import html as _h
+    out = f"<p style='margin:3px 0 0 0;font-size:{pt}pt;font-weight:bold'>{_h.escape(establishment(cfg))}</p>"
+    ar = establishment_ar(cfg)
+    if ar:
+        out += f"<p dir='rtl' style='margin:0 0 3px 0;font-size:{pt}pt;font-weight:bold'>{_h.escape(ar)}</p>"
+    return out
+
+
+def header_lines(cfg, d=64):
+    """[(texte, style, arabe?)] du bandeau : tutelle FR (2 lignes), tutelle AR, structure FR puis, juste dessous, structure AR."""
+    fs = max(12, d // 4)
+    fr = tutelle_fr_lines(cfg)
+    lines = [(fr[0], f"font-size:{fs}px;font-weight:700;", False)]
+    lines += [(t, f"font-size:{max(11, fs - 1)}px;font-weight:600;color:#8b97a7;", False) for t in fr[1:]]
+    lines.append((tutelle_ar(cfg), f"font-size:{max(11, fs - 1)}px;font-weight:600;color:#8b97a7;font-family:{AR_FONT};", True))
+    name = establishment(cfg) if cfg is not None else ""
+    if name:
+        lines.append((name, f"font-size:{fs}px;font-weight:800;color:#4f9dff;", False))
+    ar = establishment_ar(cfg)
+    if ar:
+        lines.append((ar, f"font-size:{fs + 1}px;font-weight:800;color:#4f9dff;font-family:{AR_FONT};", True))
+    return lines
 
 
 class HeaderBar(QFrame):
@@ -131,12 +209,22 @@ class HeaderBar(QFrame):
         right.setPixmap(flag_pixmap(d))
         for lab in (left, right):
             lab.setFixedSize(d, d)
-        mid = QVBoxLayout()
-        lines = [(TITLE, f"font-size:{max(12, d // 4)}px;font-weight:700;"), (MINISTRY, f"font-size:{max(11, d // 4 - 1)}px;font-weight:600;color:#8b97a7;")]
-        name = establishment(cfg) if cfg is not None else ""
-        if name:
-            lines.append((name, f"font-size:{max(12, d // 4)}px;font-weight:800;color:#4f9dff;"))
-        for text, style in lines:
-            lab = QLabel(text); lab.setStyleSheet(style); lab.setAlignment(Qt.AlignmentFlag.AlignCenter); lab.setTextFormat(Qt.TextFormat.PlainText)
-            mid.addWidget(lab)
+        self.cfg, self.d, self.mid = cfg, d, QVBoxLayout()
+        mid = self.mid
+        self._fill()
         h.addWidget(left); h.addLayout(mid, 1); h.addWidget(right)
+
+    def _fill(self):
+        while self.mid.count():
+            it = self.mid.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        for text, style, arabic in header_lines(self.cfg, self.d):
+            lab = QLabel(text); lab.setStyleSheet(style); lab.setAlignment(Qt.AlignmentFlag.AlignCenter); lab.setTextFormat(Qt.TextFormat.PlainText)
+            if arabic:
+                lab.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+            self.mid.addWidget(lab)
+
+    def refresh(self):
+        """Mise à jour dynamique après un changement des noms officiels (Paramètres du Hub)."""
+        self._fill()

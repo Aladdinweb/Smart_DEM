@@ -7,7 +7,7 @@ from PyQt6.QtGui import QPixmap
 
 import templates
 from barcode import barcode_image
-from branding import establishment, logo_path
+from branding import logo_path, structure_block_html, tutelle_block_html
 from database import FMT, age_from_row, display_name
 from functions import honorific
 from qr import qr_image
@@ -23,9 +23,7 @@ def header_html(cfg, kind=None):
     logo = "<img src='logo_ministere' width='70' height='70'>" if logo_path() else ""
     return f"""<table width='100%' cellspacing='0' cellpadding='2'><tr>
 <td width='80' align='left'>{logo}</td>
-<td align='center'><p style='margin:0;font-size:12pt;font-weight:bold'>République Algérienne Démocratique et Populaire</p>
-<p style='margin:0;font-size:11pt'>Ministère de la Santé</p>
-<p style='margin:3px 0 0 0;font-size:10pt;font-weight:bold'>{esc(establishment(cfg))}</p></td>
+<td align='center'>{tutelle_block_html(cfg, 12, 11)}{structure_block_html(cfg, 10)}</td>
 <td width='80' align='right'><img src='drapeau' width='70' height='70'></td></tr></table><hr>"""
 
 

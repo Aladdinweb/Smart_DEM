@@ -146,6 +146,31 @@ class Controller(QObject):
         QTimer.singleShot(0, self.next_login)
 
 
+def default_establishment(cfg):
+    """Noms officiels initiaux : assets/etablissement_defaut.json s'il correspond à la structure configurée, sinon déduits de la configuration (arabe vide)."""
+    import json
+    from branding import establishment, tutelle_ar, tutelle_fr
+    base = {"tutelle_fr": tutelle_fr(), "tutelle_ar": tutelle_ar(), "structure_fr": establishment(cfg), "structure_ar": ""}
+    try:
+        with open(resource_path(os.path.join("assets", "etablissement_defaut.json")), encoding="utf-8") as f:
+            preset = json.load(f)
+        key = (cfg.get("parent") or "").strip().upper()
+        if key and key in (preset.get("structure_fr") or "").upper():
+            base.update({k: preset[k] for k in base if preset.get(k)})
+    except (OSError, ValueError):
+        pass
+    return base
+
+
+def init_establishment(cfg, db):
+    """Hub / autonome : reprend le PIN administrateur de la configuration et initialise les noms officiels ; tous les modes : charge le cache d'en-tête."""
+    from branding import refresh_establishment
+    if isinstance(db, Database):
+        db.admin_adopt_pin(cfg.get("pin_salt"), cfg.get("pin_hash"))
+        db.seed_establishment(default_establishment(cfg))
+    refresh_establishment(db)
+
+
 def housekeeping(cfg, db, app):
     """Sauvegarde quotidienne, rapport mensuel DSP, synchronisation en arrière-plan (hub / autonome seulement)."""
     if not isinstance(db, Database):
@@ -162,7 +187,7 @@ def housekeeping(cfg, db, app):
             from documents import header_html
             from printer import print_document
             from reports import report_html
-            st = db.stats_report(prev_start.isoformat(), prev_end.isoformat())
+            st = db.stats_report_system(prev_start.isoformat(), prev_end.isoformat())
             if st["admissions"]:
                 ok, msg = print_document(cfg, report_html(cfg, st, header_html(cfg)), {}, "a4", f"rapport_DSP_{prev_start:%Y-%m}")
                 os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -225,6 +250,7 @@ def main():
                 cfg.set("net_mode", "local"); cfg.save(); continue
             return 1
 
+    init_establishment(cfg, db)
     housekeeping(cfg, db, app)
     if cfg.get("tv_autostart") and cfg.get("tv_screen"):
         from ui_common import open_tv

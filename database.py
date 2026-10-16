@@ -1,6 +1,6 @@
 """Couche SQLite : utilisateurs (PIN), gardes, admissions, consultations, ordonnances sécurisées, radiologie,
 analyses, pharmacie. Toutes les méthodes publiques de RPC_METHODS sont aussi appelables à distance via le Hub."""
-import base64, hashlib, hmac, json, os, re, secrets, sqlite3, threading, unicodedata, uuid
+import base64, hashlib, hmac, json, os, re, secrets, sqlite3, threading, time, unicodedata, uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
@@ -143,6 +143,10 @@ def birth_text(r):
     return date.fromisoformat(r["birth_date"]).strftime("%d/%m/%Y") if r.get("birth_date") else str(age_from_row(r))
 
 
+def _hash_admin(pin, salt_hex):                 # même algorithme que config_manager (200 000 itérations) : le PIN de l'ancienne configuration est repris tel quel
+    return hashlib.pbkdf2_hmac("sha256", pin.encode(), bytes.fromhex(salt_hex), 200_000).hex()
+
+
 def _hash_pin(pin, salt_hex):
     return hashlib.pbkdf2_hmac("sha256", pin.encode(), bytes.fromhex(salt_hex), 100_000).hex()
 
@@ -169,7 +173,7 @@ RPC_METHODS = (
     "tv_screens", "tv_set_screens", "create_appointment", "update_appointment", "delete_appointment", "list_appointments",
     "appointment_days", "appointment_checkin", "message_recipients", "send_message", "inbox", "outbox", "messages_poll", "message_read", "message_ack",
     "doc_template_kinds", "list_doc_templates", "get_doc_template", "import_doc_template", "delete_doc_template", "record_document_issued", "record_act",
-    "acts_for_admission", "stats_report",
+    "acts_for_admission", "stats_report", "admin_pin_status", "admin_login", "admin_set_pin", "get_establishment", "set_establishment",
 )
 
 
@@ -177,7 +181,8 @@ class Database:
     def __init__(self, path, crypto=None):
         self.path = path
         self.crypto = crypto or Crypto.for_dir(os.path.dirname(os.path.abspath(path)))
-        self._ctx = threading.local()      # identité de session imposée par le Hub (JWT)
+        self._ctx = threading.local()      # identité de session imposée par le Hub (JWT) : uid, remote, admin
+        self._local_admin_until = 0.0      # session administrateur de CE processus (Hub / autonome) ; les appels distants n'en bénéficient jamais
         self.sync_enabled, self.backup_dir = False, None
         self.call_listeners = []
         self.tv_listeners = []
@@ -312,6 +317,108 @@ class Database:
         if u["role"] not in roles:
             raise PermissionError("Action non autorisée pour votre rôle.")
         return u["role"]
+
+    # ---------- administrateur vérifié par le Hub (v1.5.0) ----------
+    def _is_admin_session(self):
+        """Appel distant : jeton administrateur émis par le Hub. Appel local (interface du Hub / autonome) : PIN saisi il y a moins de 15 min."""
+        if getattr(self._ctx, "remote", False):
+            return bool(getattr(self._ctx, "admin", False))
+        return time.time() < self._local_admin_until
+
+    def _require_manager(self, user_id):
+        """Responsables : coordinateurs (médecins / paramédical) ou administrateur."""
+        if self._is_admin_session():
+            return "admin"
+        return self._require(user_id, ("coord_med", "coord_para"))
+
+    def admin_pin_status(self):
+        return {"set": bool(self._meta("admin_pin_hash"))}
+
+    def admin_adopt_pin(self, salt, hash_):
+        """Reprise (au démarrage du Hub) du PIN administrateur de l'ancienne configuration locale ; appel local uniquement."""
+        if salt and hash_ and not self._meta("admin_pin_hash"):
+            with self._tx() as c:
+                self._set_meta(c, "admin_pin_salt", salt); self._set_meta(c, "admin_pin_hash", hash_)
+                self._audit(c, None, "ADMIN_PIN_ADOPTED", {}, "")
+            return True
+        return False
+
+    def admin_login(self, pin):
+        """Vérifie le PIN administrateur SUR LE HUB (5 échecs = blocage 60 s). Le Hub ajoute un jeton administrateur de 15 min."""
+        if not self._meta("admin_pin_hash"):
+            if not getattr(self._ctx, "remote", False):          # poste Hub / autonome sans PIN : comportement historique (accès libre sur ce poste)
+                self._local_admin_until = time.time() + 15 * 60
+                return {"ok": True, "no_pin": True}
+            return {"ok": False, "error": "Aucun PIN administrateur défini sur le Hub : définissez-le dans Paramètres, sur le poste Hub."}
+        with self._tx() as c:
+            lock = self._meta("admin_locked_until")
+            if lock and lock > now():
+                return {"ok": False, "error": "Trop d'échecs : accès administrateur verrouillé 60 secondes."}
+            if hmac.compare_digest(_hash_admin(pin or "", self._meta("admin_pin_salt")), self._meta("admin_pin_hash")):
+                self._set_meta(c, "admin_failed", "0"); self._set_meta(c, "admin_locked_until", "")
+                self._audit(c, None, "ADMIN_LOGIN", {"ok": True, "remote": bool(getattr(self._ctx, "remote", False))}, "")
+                if not getattr(self._ctx, "remote", False):
+                    self._local_admin_until = time.time() + 15 * 60
+                return {"ok": True}
+            n = int(self._meta("admin_failed", "0") or 0) + 1
+            locked = (datetime.now() + timedelta(seconds=60)).strftime(FMT) if n >= 5 else ""
+            self._set_meta(c, "admin_failed", "0" if locked else str(n)); self._set_meta(c, "admin_locked_until", locked)
+            self._audit(c, None, "ADMIN_LOGIN", {"ok": False, "remote": bool(getattr(self._ctx, "remote", False))}, "")
+            return {"ok": False, "error": "Accès administrateur verrouillé 60 secondes." if locked else f"Code PIN incorrect ({n}/5)."}
+
+    def admin_logout(self):
+        self._local_admin_until = 0.0
+        return True
+
+    def admin_set_pin(self, new_pin):
+        """Définit / change le PIN administrateur. Le premier PIN est libre ; ensuite une session administrateur est exigée."""
+        new_pin = (new_pin or "").strip()
+        if len(new_pin) < 4:
+            raise ValueError("Le PIN administrateur doit comporter au moins 4 caractères.")
+        if self._meta("admin_pin_hash") and not self._is_admin_session():
+            raise PermissionError("Authentification administrateur requise pour changer le PIN.")
+        salt = secrets.token_hex(16)
+        with self._tx() as c:
+            self._set_meta(c, "admin_pin_salt", salt); self._set_meta(c, "admin_pin_hash", _hash_admin(new_pin, salt))
+            self._set_meta(c, "admin_failed", "0"); self._set_meta(c, "admin_locked_until", "")
+            self._audit(c, None, "ADMIN_PIN_SET", {"remote": bool(getattr(self._ctx, "remote", False))}, "")
+        return True
+
+    # ---------- établissement bilingue FR / AR (v1.5.0) ----------
+    ESTAB_KEYS = ("tutelle_fr", "tutelle_ar", "structure_fr", "structure_ar")
+
+    def get_establishment(self):
+        try:
+            d = json.loads(self._meta("establishment", "{}") or "{}")
+        except ValueError:
+            d = {}
+        out = {k: str(d.get(k, "") or "") for k in self.ESTAB_KEYS}
+        out["rev"] = int(self._meta("establishment_rev", "0") or 0)
+        return out
+
+    def set_establishment(self, d):
+        clean = {}
+        for k in self.ESTAB_KEYS:
+            v = re.sub(r"[\x00-\x1f\x7f]", " ", str((d or {}).get(k, "") or "")).strip()
+            if len(v) > 200:
+                raise ValueError("Nom trop long (200 caractères maximum).")
+            clean[k] = v
+        if not clean["structure_fr"]:
+            raise ValueError("Le nom officiel de la structure en français est obligatoire.")
+        with self._tx() as c:
+            self._set_meta(c, "establishment", json.dumps(clean, ensure_ascii=False))
+            self._set_meta(c, "establishment_rev", str(int(self._meta("establishment_rev", "0") or 0) + 1))
+            self._audit(c, None, "ESTABLISHMENT_SET", {"remote": bool(getattr(self._ctx, "remote", False))}, "")
+        return self.get_establishment()
+
+    def seed_establishment(self, defaults):
+        """Valeurs initiales (fichier assets/etablissement_defaut.json ou configuration) si le Hub n'a encore rien ; appel local uniquement."""
+        if self._meta("establishment"):
+            return False
+        with self._tx() as c:
+            self._set_meta(c, "establishment", json.dumps({k: str(defaults.get(k, "") or "") for k in self.ESTAB_KEYS}, ensure_ascii=False))
+            self._set_meta(c, "establishment_rev", "1")
+        return True
 
     def _require_fn(self, user_id, functions):
         self._require(user_id, ("labo",))
@@ -1572,8 +1679,9 @@ class Database:
         cond, args = self._msg_scope(me)
         base = f"FROM messages m LEFT JOIN message_reads r ON r.message_id=m.id AND r.user_id=? WHERE {cond} AND r.read_at IS NULL"
         unread = self._one(f"SELECT COUNT(*) AS n {base}", [user_id] + args)["n"]
+        rev = int(self._meta("establishment_rev", "0") or 0)
         new = self._all(f"SELECT m.*, r.read_at, r.ack_at {base} AND m.id>? ORDER BY m.id", [user_id] + args + [int(after_id or 0)])
-        return {"unread": unread, "new": new}
+        return {"unread": unread, "new": new, "estab_rev": rev}
 
     def _msg_visible(self, mid, me):
         cond, args = self._msg_scope(me)
@@ -1683,7 +1791,13 @@ class Database:
         return self._all("SELECT * FROM acts WHERE admission_id=? ORDER BY at, id", (adm_id,))
 
     # ---------- statistiques DSP (agrégats anonymes) ----------
-    def stats_report(self, date_from, date_to):
+    def stats_report(self, date_from, date_to, user_id=None):
+        """Statistiques globales : réservées aux coordinateurs et à l'administrateur (contrôle côté Hub)."""
+        self._require_manager(user_id)
+        return self.stats_report_system(date_from, date_to)
+
+    def stats_report_system(self, date_from, date_to):
+        """Calcul sans contrôle d'accès : usage interne du Hub (rapport mensuel automatique)."""
         a, b = date_from + " 00:00:00", date_to + " 23:59:59"
         one = lambda sql, args=(): self._one(sql, args)["n"]
         by = lambda sql: {r["k"]: r["n"] for r in self._all(sql, (a, b))}

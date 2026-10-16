@@ -27,6 +27,7 @@ class CoordWindow(BaseWindow):
             b = QPushButton(label); b.clicked.connect(fn); self.header_extra.addWidget(b)
         if cfg.get("tv_screen"):
             t = QPushButton("📺 Ouvrir l'écran TV"); t.clicked.connect(lambda *_: open_tv(self.cfg)); self.header_extra.addWidget(t)
+        st = QPushButton("📊 Statistiques"); st.clicked.connect(self.open_stats); self.header_extra.addWidget(st)
         if cfg.get("role") == "coord_para":
             d = QPushButton("🔎 Dossiers patients"); d.clicked.connect(self.open_dpi); self.header_extra.addWidget(d)
         tabs = QTabWidget(); self.content.addWidget(tabs, 1)
@@ -92,6 +93,12 @@ class CoordWindow(BaseWindow):
     def open_alert(self, *_):
         if self.user:
             AnnounceDialog(self.db, self.user["id"], self).exec()
+
+    @guard
+    def open_stats(self, *_):
+        if self.user:
+            from ui_settings import ReportDialog
+            ReportDialog(self.db, self.cfg, self, self.user["id"]).exec()
 
     @guard
     def open_dpi(self, *_):

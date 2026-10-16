@@ -14,14 +14,39 @@ from ui_common import USER_ROLE_LABELS, user_label
 from functions import FUNCTIONS, LABELS, ROLE_OF, DEFAULT_SERVICES, SPACE_LABELS  # noqa: E402
 
 
-def admin_ok(cfg, parent, title="Code administrateur"):
-    if not cfg.has_pin():
-        return True
+def admin_ok(cfg, parent, title="Code administrateur", db=None, offline_ok=False):
+    """Déverrouillage administrateur. Avec `db` : le PIN est vérifié PAR LE HUB (v1.5.0), qui délivre une session administrateur de 15 minutes.
+    `offline_ok` (fermeture de l'application seulement) : si le Hub est injoignable, repli sur le PIN local du poste."""
+    if db is None:
+        if not cfg.has_pin():
+            return True
+        pin, ok = QInputDialog.getText(parent, title, "Code PIN administrateur :", QLineEdit.EchoMode.Password)
+        if ok and cfg.check_pin(pin):
+            return True
+        if ok:
+            QMessageBox.warning(parent, title, "Code PIN incorrect.")
+        return False
+    try:
+        status = db.admin_pin_status()
+        if not status.get("set") and getattr(db, "admin_bearer", "x") == "x":        # poste Hub / autonome sans PIN : accès libre (historique)
+            db.admin_login("")
+            return True
+    except ConnectionError as e:
+        if offline_ok:
+            return admin_ok(cfg, parent, title)
+        QMessageBox.warning(parent, title, f"Vérification impossible : {e}")
+        return False
     pin, ok = QInputDialog.getText(parent, title, "Code PIN administrateur :", QLineEdit.EchoMode.Password)
-    if ok and cfg.check_pin(pin):
+    if not ok:
+        return False
+    try:
+        res = db.admin_login(pin)
+    except ConnectionError as e:
+        QMessageBox.warning(parent, title, f"Vérification impossible : {e}")
+        return False
+    if res.get("ok"):
         return True
-    if ok:
-        QMessageBox.warning(parent, title, "Code PIN incorrect.")
+    QMessageBox.warning(parent, title, res.get("error", "Code PIN incorrect."))
     return False
 
 
@@ -114,12 +139,12 @@ class LoginDialog(QDialog):
             self.msg.setText(res["error"]); self._reset_pin()
 
     def _manage(self):
-        if admin_ok(self.cfg, self):
+        if admin_ok(self.cfg, self, db=self.db):
             UsersDialog(self.db, self).exec()
             self._load()
 
     def _quit(self):
-        if admin_ok(self.cfg, self, "Quitter l'application"):
+        if admin_ok(self.cfg, self, "Quitter l'application", self.db, offline_ok=True):
             self.quit_requested = True
             super().reject()
 

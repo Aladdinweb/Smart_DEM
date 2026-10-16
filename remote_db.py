@@ -8,13 +8,16 @@ class HubError(ConnectionError):
     pass
 
 
+from auth import ADMIN_AWARE_RPC, ADMIN_RPC, MANAGER_RPC  # noqa: E402
+
+
 class RemoteDatabase:
     LONG = {"add_result", "get_result", "import_drugs", "import_doc_template", "get_doc_template"}
 
     def __init__(self, host, port, token, timeout=6, use_tls=False, tls_port=5443, cert_pem=""):
         self.http_base = f"http://{host}:{port}"
         self.base = f"https://{host}:{tls_port}" if use_tls else self.http_base
-        self.token, self.timeout, self.bearer, self.ctx = token, timeout, None, None
+        self.token, self.timeout, self.bearer, self.admin_bearer, self.ctx = token, timeout, None, None, None
         if use_tls:
             import tls
             self.ctx = tls.client_context(cert_pem)
@@ -31,11 +34,17 @@ class RemoteDatabase:
 
     def logout(self):
         self.bearer = None
+        self.admin_bearer = None
+
+    def admin_logout(self):
+        self.admin_bearer = None
+        return True
 
     def _call(self, method, *a, **k):
         headers = {"Content-Type": "application/json", "X-DEM-Token": self.token}
-        if self.bearer:
-            headers["Authorization"] = "Bearer " + self.bearer
+        use_admin = self.admin_bearer and (method in ADMIN_RPC or method in MANAGER_RPC or method in ADMIN_AWARE_RPC)
+        if use_admin or self.bearer:
+            headers["Authorization"] = "Bearer " + (self.admin_bearer if use_admin else self.bearer)
         req = urllib.request.Request(self.base + "/rpc", data=json.dumps({"m": method, "a": a, "k": k}).encode(), headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=90 if method in self.LONG else self.timeout, context=self.ctx) as r:
@@ -46,6 +55,9 @@ class RemoteDatabase:
             except Exception:
                 msg = ""
             if e.code == 401:
+                if use_admin:
+                    self.admin_bearer = None
+                    raise HubError("Session administrateur expirée : saisissez de nouveau le PIN administrateur.")
                 self.bearer = None
                 raise HubError(msg or "Session expirée : reconnectez-vous.")
             if e.code == 403 and msg == "forbidden":
@@ -57,6 +69,8 @@ class RemoteDatabase:
             raise HubError(f"Hub injoignable (ou certificat non reconnu) : {e}")
         if method == "verify_pin" and isinstance(res, dict) and res.get("ok"):
             self.bearer = res.get("token")
+        if method == "admin_login" and isinstance(res, dict) and res.get("ok"):
+            self.admin_bearer = res.pop("token", None)
         return res
 
     def backup(self, folder):

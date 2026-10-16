@@ -8,7 +8,7 @@ from PyQt6.QtCore import QRectF
 from PyQt6.QtGui import QPageLayout, QPageSize, QPainter, QTextDocument
 from PyQt6.QtPrintSupport import QPrinter, QPrinterInfo
 
-from branding import establishment, logo_path, print_resources
+from branding import logo_path, print_resources, structure_block_html, tutelle_block_html
 import templates
 from config_manager import data_dir
 from data_structures import SERVICE_BY_CODE
@@ -116,10 +116,9 @@ def ticket_html(cfg, row):
     return f"""<div style='text-align:center;font-family:Arial'>
 <table width='100%' cellspacing='0' cellpadding='0'><tr>
 <td width='14%'>{logo}</td>
-<td align='center'><p style='font-size:6pt;font-weight:bold;margin:0'>République Algérienne Démocratique et Populaire</p>
-<p style='font-size:6pt;margin:0'>Ministère de la Santé</p></td>
+<td align='center'>{tutelle_block_html(cfg, 6, 6)}</td>
 <td width='14%' align='right'><img src='drapeau' width='34' height='34'></td></tr></table>
-<p style='font-size:8pt;font-weight:bold;margin:2px 0 3px 0'>{e(establishment(cfg))}</p><hr>
+{structure_block_html(cfg, 8)}<hr>
 <p style='font-size:11pt;margin:2px'>{e(svc['name'])}</p>
 <p style='font-size:34pt;font-weight:bold;margin:2px'>{e(row['ticket_label'])}</p>{triage_html}
 <p style='font-size:9pt;margin:2px'>{e(name)}</p>
@@ -149,10 +148,9 @@ def appt_ticket_html(cfg, a):
     html = f"""<div style='text-align:center;font-family:Arial'>
 <table width='100%' cellspacing='0' cellpadding='0'><tr>
 <td width='14%'>{logo}</td>
-<td align='center'><p style='font-size:6pt;font-weight:bold;margin:0'>République Algérienne Démocratique et Populaire</p>
-<p style='font-size:6pt;margin:0'>Ministère de la Santé</p></td>
+<td align='center'>{tutelle_block_html(cfg, 6, 6)}</td>
 <td width='14%' align='right'><img src='drapeau' width='34' height='34'></td></tr></table>
-<p style='font-size:8pt;font-weight:bold;margin:2px 0 3px 0'>{e(establishment(cfg))}</p><hr>
+{structure_block_html(cfg, 8)}<hr>
 <p style='font-size:10pt;font-weight:bold;margin:2px'>TICKET DE RENDEZ-VOUS</p>
 <p style='font-size:11pt;margin:2px'>{e(svc['name'])}</p>
 <p style='font-size:20pt;font-weight:bold;margin:2px'>{d:%d/%m/%Y} — {e(a['time'])}</p>

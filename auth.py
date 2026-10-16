@@ -1,6 +1,15 @@
 """Jetons de session JWT (HS256) émis par le Hub après vérification du PIN ; vérifiés à chaque appel distant."""
 import base64, hashlib, hmac, json, secrets, time
 
+# --- classes d'appels RPC (partagées par le Hub et le client distant) ---
+PUBLIC_RPC = {"verify_pin", "list_users", "count_users", "tv_state", "tv_screens",           # jeton réseau seul
+              "admin_pin_status", "admin_login", "get_establishment"}
+ADMIN_RPC = {"create_user", "update_user", "delete_user", "reset_user_pin", "import_drugs", "tv_set_screens",    # jeton ADMINISTRATEUR (vérifié par le Hub)
+             "set_establishment"}
+MANAGER_RPC = {"stats_report"}                       # coordinateur (JWT utilisateur) OU administrateur
+ADMIN_AWARE_RPC = {"admin_set_pin"}                  # contrôle fait dans la base : 1er PIN libre, ensuite administrateur requis
+ADMIN_TTL = 15 * 60                                  # durée d'une session administrateur (secondes)
+
 
 def _b64(b):
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode()

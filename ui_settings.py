@@ -2,7 +2,7 @@
 import csv, json, os, shutil
 from datetime import date, timedelta
 
-from PyQt6.QtCore import QDate
+from PyQt6.QtCore import QDate, Qt
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox,
                              QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSpinBox, QTabWidget,
                              QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
@@ -18,6 +18,7 @@ from documents import header_html
 from printer import physical_printers, print_document, print_ticket
 from reports import report_csv, report_html
 from styles import stylesheet
+from branding import establishment, establishment_ar, refresh_establishment, tutelle_ar, tutelle_fr
 from ui_layout import FORMATS, profile
 from ui_common import open_tv, quit_now, restart_app
 from ui_login import UsersDialog
@@ -85,10 +86,10 @@ class TvScreensDialog(QDialog):
 
 
 class ReportDialog(QDialog):
-    """Rapports statistiques anonymes pour la Direction de la Santé (DSP) : PDF et CSV."""
-    def __init__(self, db, cfg, parent=None):
+    """Rapports statistiques anonymes pour la Direction de la Santé (DSP) : PDF et CSV. Réservés aux coordinateurs et à l'administrateur."""
+    def __init__(self, db, cfg, parent=None, user_id=None):
         super().__init__(parent)
-        self.db, self.cfg = db, cfg
+        self.db, self.cfg, self.user_id = db, cfg, user_id
         self.setWindowTitle("Rapports statistiques — DSP"); self.resize(460, 260)
         f = QFormLayout(self)
         self.d1, self.d2 = QDateEdit(QDate.currentDate().addDays(-QDate.currentDate().day() + 1)), QDateEdit(QDate.currentDate())
@@ -113,7 +114,7 @@ class ReportDialog(QDialog):
             first = QDate(t.year(), t.month(), 1).addMonths(-1); self.d1.setDate(first); self.d2.setDate(first.addMonths(1).addDays(-1))
 
     def _stats(self):
-        return self.db.stats_report(self.d1.date().toString("yyyy-MM-dd"), self.d2.date().toString("yyyy-MM-dd"))
+        return self.db.stats_report(self.d1.date().toString("yyyy-MM-dd"), self.d2.date().toString("yyyy-MM-dd"), self.user_id)
 
     def pdf(self):
         st = self._stats()
@@ -145,6 +146,25 @@ class SettingsDialog(QDialog):
         f.addRow("Fenêtre de détection des patients récurrents :", self.revisit)
         l1.addLayout(f); l1.addStretch()
         tabs.addTab(scroll(t1), "Structure && Rôle")
+
+        # ---- 1 bis. Établissement bilingue (v1.5.0) : noms officiels FR / AR tenus par le Hub, mis à jour sur tous les postes ----
+        te = QWidget(); le = QVBoxLayout(te)
+        le.addWidget(QLabel("Noms officiels affichés dans l'en-tête et sur toutes les impressions. L'arabe s'affiche juste sous le français. "
+                            "Modifiés ici, ils sont mis à jour sur tous les postes (sans redémarrage)."))
+        le.itemAt(0).widget().setWordWrap(True)
+        try:
+            cur = db.get_establishment()
+        except ConnectionError:
+            cur = {}
+        fe = QFormLayout(); self.est = {}
+        for key, label, default, rtl in (("tutelle_fr", "Tutelle — français :", tutelle_fr(cfg), False), ("tutelle_ar", "Tutelle — arabe :", tutelle_ar(cfg), True),
+                                         ("structure_fr", "Structure — français :", establishment(cfg), False), ("structure_ar", "Structure — arabe :", establishment_ar(cfg), True)):
+            w = QLineEdit(cur.get(key) or default); w.setMaxLength(200)
+            if rtl:
+                w.setLayoutDirection(Qt.LayoutDirection.RightToLeft); w.setAlignment(Qt.AlignmentFlag.AlignRight)
+            self.est[key] = w; fe.addRow(label, w)
+        le.addLayout(fe); le.addStretch()
+        tabs.addTab(scroll(te), "Établissement (FR/AR)")
 
         # ---- 2. Imprimantes & Modèles ----
         t2 = QWidget(); l2 = QVBoxLayout(t2)
@@ -415,6 +435,17 @@ class SettingsDialog(QDialog):
             err = "La synchronisation exige une adresse HTTPS."
         if err:
             return QMessageBox.warning(self, "Paramètres", err)
+        est = {k: w.text().strip() for k, w in self.est.items()}
+        try:                                                       # noms officiels et PIN : tenus et vérifiés par le Hub (session administrateur)
+            if any(est.get(k, "") != (self.db.get_establishment().get(k) or "") for k in est):
+                self.db.set_establishment(est)
+                refresh_establishment(self.db)
+                if hasattr(self.parent(), "header_bar"):
+                    self.parent().header_bar.refresh()
+            if self.pin1.text():
+                self.db.admin_set_pin(self.pin1.text())
+        except (PermissionError, ValueError, ConnectionError) as e:
+            return QMessageBox.warning(self, "Paramètres", f"{e}")
         vals = {**self.form.values(), **self.net.values()}
         changed = any(self.cfg.get(k) != v for k, v in vals.items())
         self.cfg.update(vals)
